@@ -112,6 +112,11 @@ Kabul edilen / açık kalanlar:
 - `AppSpec`: `title` alanı kaldırıldı → `name` (görünen uygulama adı) + `window` (isteğe bağlı başlık filtresi). Ad kaynağı sırası: pencerenin RelaunchDisplayName özelliği → AUMID'nin Başlat menüsü adı (PWA'lar ve Store uygulamaları: "WhatsApp Web", "Instagram") → exe'nin FileDescription'ı ("Discord") → exe adı. Eski dosyalardaki `title` okunurken atılır.
 - Editör hücre menüsü: "Open apps" (uygulamanın herhangi bir penceresi), "A specific window" alt menüsü (başlık filtresi, başındaki "(3)" gibi sayaçlar atılır), "Match any window" (filtreyi kaldır).
 - Repoda makineye özel yol/ayar yok; kayıtlar `%APPDATA%\ZTile` altında, ilk açılışta boş başlar.
+
+### Dizilimler sabit (2026-10-31, kullanıcı kararı)
+- Kayıtlı dizilim yalnızca editörden değişir. Açık grupta sürükleme / "+" / gruptan çıkarma sadece o anki grubu etkiler.
+- Dizilim başına isteğe bağlı ayar: "Save changes made in the open group" (`keep_changes`, varsayılan kapalı; eski dosyalarda da kapalı sayılır). Açıksa eski davranış: canlı değişiklikler kayda yazılır.
+- Dizilim açılırken yapılan tek kayıt işlemi uygulama adlarını tazelemek (uygulama/hücre düzenini değiştirmez; eski dosyalardaki başlıkları da temizler).
 - Exe imzasız (Faz 10).
 
 ### Faz 10 — Yayın

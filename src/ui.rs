@@ -111,6 +111,7 @@ enum Hit {
     Cell(usize),
     Divider(usize),
     Borderless,
+    KeepChanges,
     GapMinus,
     GapPlus,
     Cancel,
@@ -131,6 +132,7 @@ struct Editor {
     apps: Vec<Option<AppSpec>>,
     monitor: usize,
     borderless: bool,
+    keep_changes: bool,
     gap: i32,
     error: String,
     /// where the preview was last drawn (for divider dragging)
@@ -457,6 +459,17 @@ impl Ui {
         self.hit(r, h);
     }
 
+    /// On/off switch with a label; the whole row is clickable.
+    fn switch(&mut self, dc: HDC, x: i32, y: i32, on: bool, label: &str, h: Hit) {
+        let sw = rect(x, y + self.s(4), x + self.s(40), y + self.s(24));
+        rrect(dc, &sw, self.s(10), if on { self.th.accent } else { self.th.cell }, None);
+        let kx = if on { sw.right - self.s(10) } else { sw.left + self.s(10) };
+        circle(dc, kx, (sw.top + sw.bottom) / 2, self.s(7), rgb(255, 255, 255));
+        let lab = rect(sw.right + self.s(10), y, sw.right + self.s(520), y + self.s(28));
+        text(dc, lab, label, self.fonts.body, self.th.text, LEFT);
+        self.hit(rect(sw.left, y, lab.right, lab.bottom), h);
+    }
+
     /// Draw a layout's cells into `area`. Returns the cell rects.
     fn draw_layout(
         &mut self,
@@ -608,8 +621,16 @@ impl Ui {
     fn paint_editor(&mut self, dc: HDC, rc: RECT) {
         let pad = self.s(28);
         let ed = self.editor.as_ref().unwrap();
-        let (tree, apps, mon_idx, borderless, gapv, err, is_new) =
-            (ed.tree.clone(), ed.apps.clone(), ed.monitor, ed.borderless, ed.gap, ed.error.clone(), ed.original.is_none());
+        let (tree, apps, mon_idx, borderless, keep, gapv, err, is_new) = (
+            ed.tree.clone(),
+            ed.apps.clone(),
+            ed.monitor,
+            ed.borderless,
+            ed.keep_changes,
+            ed.gap,
+            ed.error.clone(),
+            ed.original.is_none(),
+        );
 
         // header
         let back = rect(pad - self.s(8), pad, pad + self.s(84), pad + self.s(36));
@@ -662,7 +683,7 @@ impl Ui {
 
         // canvas
         let top = py + self.s(60);
-        let bottom = rc.bottom - pad - self.s(110);
+        let bottom = rc.bottom - pad - self.s(146);
         let mon = self.mons.get(mon_idx).cloned();
         let aspect = mon.map(|m| aspect_of(m.rect.right - m.rect.left, m.rect.bottom - m.rect.top)).unwrap_or(1.6);
         let screen = fit(rect(pad, top, rc.right - pad, bottom.max(top + self.s(80))), aspect);
@@ -708,13 +729,15 @@ impl Ui {
 
         // options
         let oy = screen.bottom + self.s(18);
-        let sw = rect(pad, oy + self.s(4), pad + self.s(40), oy + self.s(24));
-        rrect(dc, &sw, self.s(10), if borderless { self.th.accent } else { self.th.cell }, None);
-        let kx = if borderless { sw.right - self.s(10) } else { sw.left + self.s(10) };
-        circle(dc, kx, (sw.top + sw.bottom) / 2, self.s(7), rgb(255, 255, 255));
-        let lab = rect(sw.right + self.s(10), oy, sw.right + self.s(420), oy + self.s(28));
-        text(dc, lab, "Hide title bars (apps with a classic title bar only)", self.fonts.body, self.th.text, LEFT);
-        self.hit(rect(sw.left, oy, lab.right, lab.bottom), Hit::Borderless);
+        self.switch(dc, pad, oy, borderless, "Hide title bars (apps with a classic title bar only)", Hit::Borderless);
+        self.switch(
+            dc,
+            pad,
+            oy + self.s(34),
+            keep,
+            "Save changes made in the open group (dragging, +) to this layout",
+            Hit::KeepChanges,
+        );
 
         let gx = rc.right - pad - self.s(250);
         text(dc, rect(gx, oy, gx + self.s(110), oy + self.s(28)), "Gap", self.fonts.body, self.th.text, LEFT);
@@ -772,6 +795,7 @@ impl Ui {
                     .and_then(|m| self.mons.iter().position(|x| x.device == m.device))
                     .unwrap_or(0),
                 borderless: l.borderless,
+                keep_changes: l.keep_changes,
                 gap: l.gap,
                 error: String::new(),
                 canvas: RECT::default(),
@@ -783,6 +807,7 @@ impl Ui {
                 apps: vec![None; 4],
                 monitor: self.mons.iter().position(|m| m.primary).unwrap_or(0),
                 borderless: false,
+                keep_changes: false,
                 gap: 0,
                 error: String::new(),
                 canvas: RECT::default(),
@@ -857,6 +882,7 @@ impl Ui {
             tree: ed.tree.clone(),
             gap: ed.gap,
             borderless: ed.borderless,
+            keep_changes: ed.keep_changes,
             apps: ed.apps.clone(),
         };
         if let Some(o) = &ed.original {
@@ -1131,6 +1157,7 @@ fn click(hit: Hit) -> Action {
                         e.apps.resize(e.tree.cell_count(), None);
                     }
                     Hit::Borderless => e.borderless = !e.borderless,
+                    Hit::KeepChanges => e.keep_changes = !e.keep_changes,
                     Hit::GapMinus => e.gap = (e.gap - 2).max(0),
                     Hit::GapPlus => e.gap = (e.gap + 2).min(40),
                     _ => {}

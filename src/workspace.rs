@@ -69,6 +69,8 @@ pub struct Setup {
     pub hwnds: Vec<Option<HWND>>,
     /// saved app per cell (keeps user choices such as a pinned window); may be empty
     pub specs: Vec<Option<AppSpec>>,
+    /// write changes made in the live group (drag, "+") back to the saved layout
+    pub keep_changes: bool,
 }
 
 struct Slot {
@@ -93,6 +95,8 @@ struct Workspace {
     cells: Vec<RECT>,
     slots: Vec<Slot>,
     borderless: bool,
+    /// the layout's "save changes made in the group" option
+    keep_changes: bool,
     minimized: bool,
     icons: Vec<HICON>,
 }
@@ -437,6 +441,7 @@ pub fn open_saved(l: &SavedLayout, monitor: Option<win::Monitor>) {
         borderless: l.borderless,
         hwnds,
         specs: l.apps.clone(),
+        keep_changes: l.keep_changes,
     }) else {
         return;
     };
@@ -456,8 +461,7 @@ pub fn open_saved(l: &SavedLayout, monitor: Option<win::Monitor>) {
         out
     })
     .unwrap_or_default();
-    // refresh app names in the saved layout (also drops titles from older files)
-    persist(id);
+    refresh_saved_names(id);
     for (slot, spec) in missing {
         launch_into(id, slot, spec);
     }
@@ -465,7 +469,7 @@ pub fn open_saved(l: &SavedLayout, monitor: Option<win::Monitor>) {
 
 /// Create a workspace and tile its windows. Returns its id.
 pub fn open(setup: Setup) -> Option<u32> {
-    let Setup { name, tree, monitor: mon, gap, borderless, mut hwnds, mut specs } = setup;
+    let Setup { name, tree, monitor: mon, gap, borderless, mut hwnds, mut specs, keep_changes } = setup;
     let ncells = tree.cells();
     hwnds.resize(ncells.len(), None);
     specs.resize(ncells.len(), None);
@@ -542,6 +546,7 @@ pub fn open(setup: Setup) -> Option<u32> {
                 cells,
                 slots,
                 borderless,
+                keep_changes,
                 minimized: false,
                 icons: Vec::new(),
             });
@@ -684,12 +689,14 @@ fn sync_hooks(a: &mut App) {
     }
 }
 
-/// Write a named workspace's current apps back to its saved layout.
-/// Called after deliberate changes (drag, "+"), not when an app merely closes.
+/// Write a named workspace's current apps back to its saved layout, if that
+/// layout asks for it ("save changes made in the group"); otherwise the saved
+/// layout stays exactly as it was edited. Called after deliberate changes
+/// (drag, "+"), not when an app merely closes.
 fn persist(id: u32) {
     let Some((name, specs)) = with(|a| {
         let ws = &a.spaces[a.idx(id)?];
-        if ws.name.is_empty() {
+        if ws.name.is_empty() || !ws.keep_changes {
             return None;
         }
         Some((ws.name.clone(), ws.slots.iter().map(|s| s.spec.clone()).collect::<Vec<_>>()))
@@ -705,6 +712,36 @@ fn persist(id: u32) {
     l.apps = specs;
     let _ = st.save();
     crate::ui::refresh();
+}
+
+/// Housekeeping only, never changes which apps a layout has: fill in app names
+/// for cells whose app is running (older files had none, and kept window titles,
+/// which this save drops).
+fn refresh_saved_names(id: u32) {
+    let Some((name, live)) = with(|a| {
+        let ws = &a.spaces[a.idx(id)?];
+        let live: Vec<Option<AppSpec>> =
+            ws.slots.iter().map(|s| s.hwnd.and_then(|_| s.spec.clone())).collect();
+        (!ws.name.is_empty()).then(|| (ws.name.clone(), live))
+    })
+    .flatten() else {
+        return;
+    };
+    let mut st = Store::load();
+    let Some(l) = st.layouts.iter_mut().find(|l| l.name.eq_ignore_ascii_case(&name)) else { return };
+    let mut changed = false;
+    for (saved, live) in l.apps.iter_mut().zip(&live) {
+        if let (Some(s), Some(lv)) = (saved.as_mut(), live) {
+            if s.same_app(lv) && !lv.name.is_empty() && s.name != lv.name {
+                s.name = lv.name.clone();
+                changed = true;
+            }
+        }
+    }
+    if changed {
+        let _ = st.save();
+        crate::ui::refresh();
+    }
 }
 
 fn refresh_icon(id: u32) {

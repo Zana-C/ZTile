@@ -46,6 +46,9 @@ pub struct SavedLayout {
     pub borderless: bool,
     /// one entry per cell, in cell order; None = empty cell ("+")
     pub apps: Vec<Option<AppSpec>>,
+    /// false (default): the layout only changes in the editor. true: changes made
+    /// in the open group (dragging, "+") are written back to it.
+    pub keep_changes: bool,
 }
 
 impl SavedLayout {
@@ -63,6 +66,7 @@ impl SavedLayout {
             ("tree", self.tree.to_json()),
             ("gap", Json::Num(self.gap as f64)),
             ("borderless", Json::Bool(self.borderless)),
+            ("keep_changes", Json::Bool(self.keep_changes)),
             ("apps", Json::Arr(self.apps.iter().map(|a| a.as_ref().map_or(Json::Null, AppSpec::to_json)).collect())),
         ])
     }
@@ -87,6 +91,7 @@ impl SavedLayout {
             tree,
             gap: j.get("gap").and_then(Json::as_f64).filter(|g| g.is_finite()).unwrap_or(0.0).clamp(0.0, 64.0) as i32,
             borderless: j.get("borderless").and_then(Json::as_bool).unwrap_or(false),
+            keep_changes: j.get("keep_changes").and_then(Json::as_bool).unwrap_or(false),
             apps,
         })
     }
@@ -201,9 +206,18 @@ mod tests {
                 None,
                 None,
             ],
+            keep_changes: true,
         });
         let back = Store::from_text(&s.to_text()).unwrap();
         assert_eq!(back.layouts, s.layouts);
+    }
+
+    #[test]
+    fn older_files_keep_layouts_fixed() {
+        // files written before the option existed: changes are not written back
+        let old = r#"{"version":1,"layouts":[{"name":"A","tree":"cell","apps":[null]}]}"#;
+        let s = Store::from_text(old).unwrap();
+        assert!(!s.layouts[0].keep_changes);
     }
 
     #[test]
@@ -215,6 +229,7 @@ mod tests {
             gap,
             borderless: false,
             apps: vec![None],
+            keep_changes: false,
         };
         let mut s = Store::default();
         s.put(mk("Work", 0));

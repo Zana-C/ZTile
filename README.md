@@ -75,8 +75,11 @@ From then on, open a layout by clicking its card in the ZTile window, or from
 the tray icon's menu. Right-click a card to edit, close or delete it. Closing the
 ZTile window keeps it running in the tray; use **Quit** in the tray menu to exit.
 
-Changes you make to an open saved group (swapping apps by dragging, filling an
-empty cell) are saved to that layout automatically.
+A saved layout only changes when you edit it. Rearranging an open group
+(swapping apps by dragging, filling an empty cell) affects that group only; the
+next time you open the layout it's back to how you saved it. If you'd rather
+keep such changes, turn on **Save changes made in the open group** in the
+layout's editor.
 
 ## Your data
 

@@ -324,6 +324,7 @@ fn grid(a: &[String]) {
             gap,
             borderless,
             apps: specs.clone(),
+            keep_changes: false,
         });
         match st.save() {
             Ok(()) => println!("Saved \"{name}\" to {}", Store::path().display()),
@@ -338,6 +339,7 @@ fn grid(a: &[String]) {
         borderless,
         hwnds,
         specs,
+        keep_changes: false,
     });
 }
 
