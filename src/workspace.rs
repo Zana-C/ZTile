@@ -67,6 +67,8 @@ pub struct Setup {
     pub borderless: bool,
     /// one per cell, in cell order; None = empty cell
     pub hwnds: Vec<Option<HWND>>,
+    /// saved app per cell (keeps user choices such as a pinned window); may be empty
+    pub specs: Vec<Option<AppSpec>>,
 }
 
 struct Slot {
@@ -165,7 +167,11 @@ struct App {
     spaces: Vec<Workspace>,
     next_id: u32,
     taskbar: Option<ITaskbarList>,
+    /// system-wide hooks for rare events (foreground, drag start/end, minimize)
     hooks: Vec<HWINEVENTHOOK>,
+    /// per-process hooks for chatty events (destroy/hide, location), only for the
+    /// processes we care about: members and the window being dragged
+    obj_hooks: Vec<(u32, [HWINEVENTHOOK; 2])>,
     drag: Option<Drag>,
     pending: Vec<Pending>,
     daemon: HWND,
@@ -218,9 +224,13 @@ fn taskbar() -> Option<ITaskbarList> {
 
 // ---------------------------------------------------------------- daemon / IPC
 
-/// The running daemon's hidden window, if any.
+/// The running daemon's hidden window, if any. Must belong to a ztile.exe process:
+/// another program creating a window with our class name can't stop us starting
+/// or receive our commands.
 pub fn daemon_window() -> Option<HWND> {
-    unsafe { FindWindowW(CLASS_DAEMON, None).ok().filter(|h| !h.is_invalid()) }
+    let h = unsafe { FindWindowW(CLASS_DAEMON, None).ok().filter(|h| !h.is_invalid())? };
+    let ours = std::env::current_exe().ok()?.file_name()?.to_string_lossy().to_lowercase();
+    win::exe_name(h).eq_ignore_ascii_case(&ours).then_some(h)
 }
 
 pub fn daemon_hwnd() -> HWND {
@@ -308,14 +318,13 @@ pub fn init(on_command: fn(&[String])) -> bool {
         .unwrap_or_default();
         let _ = SetLayeredWindowAttributes(overlay, COLORREF(0), 90, LWA_ALPHA);
 
+        // Only rare system events are watched system-wide. Object events (every
+        // mouse move produces some) are hooked per process in sync_hooks().
         let flags = WINEVENT_OUTOFCONTEXT | WINEVENT_SKIPOWNPROCESS;
         let hooks = [
             (EVENT_SYSTEM_FOREGROUND, EVENT_SYSTEM_FOREGROUND),
             (EVENT_SYSTEM_MOVESIZESTART, EVENT_SYSTEM_MOVESIZEEND),
             (EVENT_SYSTEM_MINIMIZESTART, EVENT_SYSTEM_MINIMIZESTART),
-            (EVENT_OBJECT_DESTROY, EVENT_OBJECT_DESTROY),
-            (EVENT_OBJECT_HIDE, EVENT_OBJECT_HIDE),
-            (EVENT_OBJECT_LOCATIONCHANGE, EVENT_OBJECT_LOCATIONCHANGE),
         ]
         .iter()
         .map(|&(a, b)| SetWinEventHook(a, b, None, Some(hook), 0, 0, flags))
@@ -326,6 +335,7 @@ pub fn init(on_command: fn(&[String])) -> bool {
             next_id: 1,
             taskbar: taskbar(),
             hooks,
+            obj_hooks: Vec::new(),
             drag: None,
             pending: Vec::new(),
             daemon,
@@ -337,7 +347,32 @@ pub fn init(on_command: fn(&[String])) -> bool {
         APP.with(|a| *a.borrow_mut() = Some(app));
         let _ = SetConsoleCtrlHandler(Some(on_ctrl), true);
     }
+    // We build with panic=abort: if anything ever panics, give the windows back
+    // (taskbar buttons, corners, minimized state) before the process dies.
+    std::panic::set_hook(Box::new(|_| emergency_restore()));
     true
+}
+
+/// Last-resort cleanup that needs nothing but the member list.
+fn emergency_restore() {
+    let members: Vec<isize> = MEMBERS.with(|m| m.try_borrow().map(|m| m.clone()).unwrap_or_default());
+    let tb = taskbar();
+    for hv in members {
+        let h = HWND(hv as *mut _);
+        if !win::is_alive(h) {
+            continue;
+        }
+        unsafe {
+            if let Some(tb) = &tb {
+                let _ = tb.AddTab(h);
+            }
+            if win::is_minimized(h) {
+                let _ = ShowWindow(h, SW_SHOWNOACTIVATE);
+            }
+        }
+        win::set_square_corners(h, false);
+    }
+    crate::tray::remove();
 }
 
 pub fn run_loop() {
@@ -401,6 +436,7 @@ pub fn open_saved(l: &SavedLayout, monitor: Option<win::Monitor>) {
         gap: l.gap,
         borderless: l.borderless,
         hwnds,
+        specs: l.apps.clone(),
     }) else {
         return;
     };
@@ -420,6 +456,8 @@ pub fn open_saved(l: &SavedLayout, monitor: Option<win::Monitor>) {
         out
     })
     .unwrap_or_default();
+    // refresh app names in the saved layout (also drops titles from older files)
+    persist(id);
     for (slot, spec) in missing {
         launch_into(id, slot, spec);
     }
@@ -427,9 +465,10 @@ pub fn open_saved(l: &SavedLayout, monitor: Option<win::Monitor>) {
 
 /// Create a workspace and tile its windows. Returns its id.
 pub fn open(setup: Setup) -> Option<u32> {
-    let Setup { name, tree, monitor: mon, gap, borderless, mut hwnds } = setup;
+    let Setup { name, tree, monitor: mon, gap, borderless, mut hwnds, mut specs } = setup;
     let ncells = tree.cells();
     hwnds.resize(ncells.len(), None);
+    specs.resize(ncells.len(), None);
     let cells = layout::to_pixels(&ncells, mon.work, gap);
 
     // A window can only live in one workspace: take it out of its old one.
@@ -491,7 +530,7 @@ pub fn open(setup: Setup) -> Option<u32> {
                 )
                 .unwrap_or_default();
                 SetWindowLongPtrW(plus, GWLP_USERDATA, ((id as isize) << 16) | i as isize);
-                slots.push(Slot { hwnd: None, spec: None, old_style: None, armed_until: None, plus });
+                slots.push(Slot { hwnd: None, spec: specs[i].clone(), old_style: None, armed_until: None, plus });
             }
             a.spaces.push(Workspace {
                 id,
@@ -538,7 +577,14 @@ pub fn open(setup: Setup) -> Option<u32> {
 /// Take ownership of a window for slot `i`: hide its taskbar button, place it.
 fn adopt(tb: &Option<ITaskbarList>, ws: &mut Workspace, i: usize, h: HWND) {
     ws.slots[i].hwnd = Some(h);
-    ws.slots[i].spec = Some(AppSpec::of(h));
+    let mut spec = AppSpec::of(h);
+    // same app as the cell already had: keep the user's choices (pinned window)
+    if let Some(old) = &ws.slots[i].spec {
+        if old.same_app(&spec) {
+            spec.window = old.window.clone();
+        }
+    }
+    ws.slots[i].spec = Some(spec);
     if let Some(tb) = tb {
         unsafe {
             let _ = tb.DeleteTab(h);
@@ -597,9 +643,45 @@ fn release(tb: &Option<ITaskbarList>, ws: &mut Workspace, i: usize, give_back_ta
     }
 }
 
-fn sync_members(a: &App) {
+fn sync_members(a: &mut App) {
     let m: Vec<isize> = a.spaces.iter().flat_map(|w| w.members()).map(|(_, h)| h.0 as isize).collect();
     MEMBERS.with(|x| *x.borrow_mut() = m);
+    sync_hooks(a);
+}
+
+/// Keep exactly one pair of object-event hooks per process we watch.
+fn sync_hooks(a: &mut App) {
+    let mut want: Vec<u32> = a.spaces.iter().flat_map(|w| w.members()).map(|(_, h)| win::pid(h)).collect();
+    if let Some(d) = &a.drag {
+        want.push(win::pid(d.h));
+    }
+    want.retain(|p| *p != 0);
+    want.sort_unstable();
+    want.dedup();
+    a.obj_hooks.retain(|(pid, hs)| {
+        if want.contains(pid) {
+            return true;
+        }
+        for h in hs {
+            unsafe {
+                let _ = UnhookWinEvent(*h);
+            }
+        }
+        false
+    });
+    for pid in want {
+        if a.obj_hooks.iter().any(|(p, _)| *p == pid) {
+            continue;
+        }
+        let f = WINEVENT_OUTOFCONTEXT;
+        let hs = unsafe {
+            [
+                SetWinEventHook(EVENT_OBJECT_DESTROY, EVENT_OBJECT_HIDE, None, Some(hook), pid, 0, f),
+                SetWinEventHook(EVENT_OBJECT_LOCATIONCHANGE, EVENT_OBJECT_LOCATIONCHANGE, None, Some(hook), pid, 0, f),
+            ]
+        };
+        a.obj_hooks.push((pid, hs));
+    }
 }
 
 /// Write a named workspace's current apps back to its saved layout.
@@ -796,6 +878,11 @@ fn shutdown() {
         for h in a.hooks.drain(..) {
             let _ = UnhookWinEvent(h);
         }
+        for (_, hs) in a.obj_hooks.drain(..) {
+            for h in hs {
+                let _ = UnhookWinEvent(h);
+            }
+        }
         let _ = DestroyWindow(a.overlay);
     });
 }
@@ -807,7 +894,7 @@ fn launch_into(id: u32, slot: usize, spec: AppSpec) {
     let before: Vec<isize> = win::app_windows().iter().map(|h| h.0 as isize).collect();
     // ShellExecute may pump messages: never call it while holding the state.
     if !apps::launch(&spec) {
-        eprintln!("  ! başlatılamadı: {}", spec.label());
+        eprintln!("  ! couldn't start: {}", spec.label());
         return;
     }
     arm(id, slot, spec, before);
@@ -837,10 +924,15 @@ fn launch_tick() {
             return;
         }
         let members: Vec<isize> = MEMBERS.with(|m| m.borrow().clone());
-        let fresh: Vec<(HWND, AppSpec)> = win::app_windows()
+        // Only windows that are new for at least one launch: the expensive part
+        // (process + property queries) runs for a handful of windows, not all.
+        let fresh: Vec<(HWND, AppSpec, String)> = win::app_windows()
             .into_iter()
-            .filter(|h| !members.contains(&(h.0 as isize)) && !win::is_fullscreen(*h))
-            .map(|h| (h, AppSpec::of(h)))
+            .filter(|h| {
+                let hv = h.0 as isize;
+                !members.contains(&hv) && a.pending.iter().any(|p| !p.before.contains(&hv)) && !win::is_fullscreen(*h)
+            })
+            .map(|h| (h, AppSpec::of(h), win::title(h)))
             .collect();
         let tb = a.taskbar.clone();
         let mut done = Vec::new();
@@ -848,8 +940,8 @@ fn launch_tick() {
         for (pi, p) in a.pending.iter().enumerate() {
             let best = fresh
                 .iter()
-                .filter(|(h, _)| !p.before.contains(&(h.0 as isize)) && !used.contains(h))
-                .filter_map(|(h, w)| p.spec.score(w).map(|s| (s, *h)))
+                .filter(|(h, _, _)| !p.before.contains(&(h.0 as isize)) && !used.contains(h))
+                .filter_map(|(h, w, t)| p.spec.score(w, t).map(|s| (s, *h)))
                 .max_by_key(|(s, _)| *s);
             let Some((_, h)) = best else { continue };
             let Some(wi) = a.idx(p.ws) else { continue };
@@ -924,6 +1016,7 @@ fn drag_start(h: HWND) {
     with(|a| {
         let from = a.locate(h).map(|(wi, s)| (a.spaces[wi].id, s));
         a.drag = Some(Drag { h, from, start: win::frame_rect(h), target: None });
+        sync_hooks(a); // start hearing this window's moves for the overlay
     });
 }
 
@@ -1074,6 +1167,7 @@ fn on_event(ev: u32, h: HWND) {
                 DRAG_HWND.set(0);
                 let ov = with(|a| {
                     a.drag = None;
+                    sync_hooks(a);
                     a.overlay
                 });
                 if let Some(ov) = ov {
@@ -1119,8 +1213,8 @@ fn on_event(ev: u32, h: HWND) {
 }
 
 unsafe extern "system" fn hook(_: HWINEVENTHOOK, ev: u32, h: HWND, obj: i32, child: i32, _: u32, _: u32) {
-    if obj != 0 || child != 0 || h.is_invalid() {
-        return; // only whole windows (OBJID_WINDOW, CHILDID_SELF)
+    if obj != 0 || child != 0 || h.is_invalid() || ev == EVENT_OBJECT_SHOW {
+        return; // only whole windows (OBJID_WINDOW, CHILDID_SELF); SHOW is in the hooked range but unused
     }
     if ev == EVENT_OBJECT_LOCATIONCHANGE || ev == EVENT_OBJECT_HIDE || ev == EVENT_OBJECT_DESTROY {
         // very chatty: drop everything but members and the dragged window right here
@@ -1159,12 +1253,20 @@ unsafe extern "system" fn daemon_proc(h: HWND, msg: u32, wp: WPARAM, lp: LPARAM)
             WM_ZT_TRAY => crate::tray::on_message(lp),
             WM_TIMER if wp.0 == TIMER_LAUNCH => launch_tick(),
             WM_COPYDATA => {
-                let cds = &*(lp.0 as *const COPYDATASTRUCT);
-                if cds.dwData != COPYDATA_ARGS {
+                if lp.0 == 0 {
                     return LRESULT(0);
                 }
-                let data = std::slice::from_raw_parts(cds.lpData as *const u16, cds.cbData as usize / 2);
-                let args: Vec<String> = String::from_utf16_lossy(data).split('\0').map(str::to_string).collect();
+                let cds = &*(lp.0 as *const COPYDATASTRUCT);
+                // Only our own small, well-formed payloads; everything else is ignored.
+                let len = cds.cbData as usize;
+                if cds.dwData != COPYDATA_ARGS || cds.lpData.is_null() || len == 0 || len % 2 != 0 || len > 8192 {
+                    return LRESULT(0);
+                }
+                let data = std::slice::from_raw_parts(cds.lpData as *const u16, len / 2);
+                let args: Vec<String> = String::from_utf16_lossy(data).split('\0').take(64).map(str::to_string).collect();
+                if !matches!(args.first().map(String::as_str), Some("grid" | "open" | "show" | "quit")) {
+                    return LRESULT(0);
+                }
                 // Run it from the message loop, not inside the sender's SendMessage.
                 COMMANDS.with(|p| p.borrow_mut().push(args));
                 let _ = PostMessageW(Some(h), WM_ZT_COMMAND, WPARAM(0), LPARAM(0));
@@ -1247,11 +1349,11 @@ fn pick_for_slot(id: u32, idx: usize, plus: HWND) {
     let cmd = unsafe {
         let Ok(menu) = CreatePopupMenu() else { return };
         if let Some(s) = &remembered {
-            let label = win::wide(&format!("▶  {} başlat", s.label()));
+            let label = win::wide(&format!("▶  Start {}", s.label()));
             let _ = AppendMenuW(menu, MF_STRING, MENU_LAUNCH_SAVED, PCWSTR(label.as_ptr()));
             let _ = AppendMenuW(menu, MF_SEPARATOR, 0, None);
         }
-        let _ = AppendMenuW(menu, MF_GRAYED, 0, w!("Açık pencerelerden seç:"));
+        let _ = AppendMenuW(menu, MF_GRAYED, 0, w!("Put an open window here:"));
         for (i, c) in cands.iter().enumerate() {
             let mut t = win::title(*c);
             if t.chars().count() > 60 {
@@ -1261,10 +1363,10 @@ fn pick_for_slot(id: u32, idx: usize, plus: HWND) {
             let _ = AppendMenuW(menu, MF_STRING, i + 1, PCWSTR(label.as_ptr()));
         }
         if cands.is_empty() {
-            let _ = AppendMenuW(menu, MF_GRAYED, 0, w!("(uygun pencere yok)"));
+            let _ = AppendMenuW(menu, MF_GRAYED, 0, w!("(no other windows open)"));
         }
         let _ = AppendMenuW(menu, MF_SEPARATOR, 0, None);
-        let _ = AppendMenuW(menu, MF_STRING, MENU_PICK_PROGRAM, w!("Program seç ve başlat..."));
+        let _ = AppendMenuW(menu, MF_STRING, MENU_PICK_PROGRAM, w!("Choose a program to start..."));
         let pt = cursor();
         let _ = SetForegroundWindow(plus);
         let cmd = TrackPopupMenu(menu, TPM_RETURNCMD | TPM_NONOTIFY | TPM_RIGHTBUTTON, pt.x, pt.y, None, plus, None);

@@ -7,6 +7,8 @@ use crate::win::Monitor;
 use std::path::PathBuf;
 
 const VERSION: f64 = 1.0;
+const MAX_FILE_BYTES: u64 = 1024 * 1024;
+const MAX_LAYOUTS: usize = 200;
 
 /// Enough to find "the same" monitor again after reboots/docking.
 #[derive(Clone, Debug, PartialEq, Default)]
@@ -83,7 +85,7 @@ impl SavedLayout {
                 height: num("height"),
             },
             tree,
-            gap: j.get("gap").and_then(Json::as_f64).unwrap_or(0.0) as i32,
+            gap: j.get("gap").and_then(Json::as_f64).filter(|g| g.is_finite()).unwrap_or(0.0).clamp(0.0, 64.0) as i32,
             borderless: j.get("borderless").and_then(Json::as_bool).unwrap_or(false),
             apps,
         })
@@ -104,13 +106,19 @@ impl Store {
     /// Missing file = empty store. A corrupt file is kept aside as .bad, never overwritten silently.
     pub fn load() -> Store {
         let path = Self::path();
-        let Ok(text) = std::fs::read_to_string(&path) else { return Store::default() };
-        match Self::from_text(&text) {
+        let Ok(meta) = std::fs::metadata(&path) else { return Store::default() };
+        // A real file is a few KB; anything huge is broken or tampered with.
+        let res = if meta.len() > MAX_FILE_BYTES {
+            Err(format!("file larger than {} KB", MAX_FILE_BYTES / 1024))
+        } else {
+            std::fs::read_to_string(&path).map_err(|e| e.to_string()).and_then(|t| Self::from_text(&t))
+        };
+        match res {
             Ok(s) => s,
             Err(e) => {
                 let bad = path.with_extension("json.bad");
                 let _ = std::fs::rename(&path, &bad);
-                eprintln!("  ! {} okunamadı ({e}); {} olarak kenara alındı.", path.display(), bad.display());
+                eprintln!("  ! couldn't read {} ({e}); moved it aside as {}.", path.display(), bad.display());
                 Store::default()
             }
         }
@@ -124,6 +132,7 @@ impl Store {
             .ok_or("missing \"layouts\"")?
             .iter()
             .filter_map(SavedLayout::from_json)
+            .take(MAX_LAYOUTS)
             .collect();
         Ok(Store { layouts })
     }
@@ -175,17 +184,18 @@ mod tests {
     fn roundtrip() {
         let mut s = Store::default();
         s.put(SavedLayout {
-            name: "Sosyal".into(),
-            monitor: MonitorId { device: "\\\\.\\DISPLAY1".into(), width: 2560, height: 1600 },
+            name: "Social".into(),
+            monitor: MonitorId { device: "\\\\.\\DISPLAY1".into(), width: 1920, height: 1080 },
             tree: layout::preset("2x2").unwrap(),
             gap: 4,
             borderless: false,
             apps: vec![
                 Some(AppSpec {
-                    exe: "C:\\Brave\\brave.exe".into(),
-                    aumid: "Brave._crx_x".into(),
+                    exe: "C:\\Apps\\browser.exe".into(),
+                    aumid: "Browser._crx_x".into(),
                     class: "Chrome_WidgetWin_1".into(),
-                    title: "WhatsApp \"Web\"".into(),
+                    name: "Chat \"Web\"".into(),
+                    window: String::new(),
                 }),
                 None,
                 None,
@@ -207,12 +217,12 @@ mod tests {
             apps: vec![None],
         };
         let mut s = Store::default();
-        s.put(mk("İş", 0));
-        s.put(mk("Oyun", 0));
-        s.put(mk("Oyun", 8));
+        s.put(mk("Work", 0));
+        s.put(mk("Games", 0));
+        s.put(mk("Games", 8));
         assert_eq!(s.layouts.len(), 2);
-        assert_eq!(s.get("oyun").unwrap().gap, 8);
-        assert!(s.remove("OYUN"));
-        assert!(s.get("Oyun").is_none());
+        assert_eq!(s.get("games").unwrap().gap, 8);
+        assert!(s.remove("GAMES"));
+        assert!(s.get("Games").is_none());
     }
 }

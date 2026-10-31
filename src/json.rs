@@ -55,7 +55,7 @@ impl Json {
     }
 
     pub fn parse(src: &str) -> Result<Json, String> {
-        let mut p = Parser { s: src.as_bytes(), i: 0 };
+        let mut p = Parser { s: src.as_bytes(), i: 0, depth: 0 };
         p.ws();
         let v = p.value()?;
         p.ws();
@@ -151,9 +151,13 @@ fn write_str(out: &mut String, s: &str) {
     out.push('"');
 }
 
+/// Deeper nesting is rejected: a crafted file must not blow the stack.
+const MAX_DEPTH: usize = 64;
+
 struct Parser<'a> {
     s: &'a [u8],
     i: usize,
+    depth: usize,
 }
 
 impl Parser<'_> {
@@ -176,8 +180,19 @@ impl Parser<'_> {
     fn value(&mut self) -> Result<Json, String> {
         match self.s.get(self.i) {
             None => Err(self.err("unexpected end")),
-            Some(b'{') => self.object(),
-            Some(b'[') => self.array(),
+            Some(b'{' | b'[') if self.depth >= MAX_DEPTH => Err(self.err("nested too deeply")),
+            Some(b'{') => {
+                self.depth += 1;
+                let r = self.object();
+                self.depth -= 1;
+                r
+            }
+            Some(b'[') => {
+                self.depth += 1;
+                let r = self.array();
+                self.depth -= 1;
+                r
+            }
             Some(b'"') => self.string().map(Json::Str),
             Some(b't') if self.eat("true") => Ok(Json::Bool(true)),
             Some(b'f') if self.eat("false") => Ok(Json::Bool(false)),
@@ -309,8 +324,20 @@ mod tests {
 
     #[test]
     fn unicode_escapes() {
-        let v = Json::parse(r#""ç 😀""#).unwrap();
-        assert_eq!(v.as_str(), Some("ç 😀"));
+        // build the escapes at runtime so the source holds a real backslash-u sequence
+        let bs = '\x5C'; // backslash
+        let src = format!("\"{bs}u00e7 {bs}ud83d{bs}ude00\"");
+        assert!(src.contains("u00e7") && !src.contains('\u{e7}'));
+        let v = Json::parse(&src).unwrap();
+        assert_eq!(v.as_str(), Some("\u{e7} \u{1F600}"));
+    }
+
+    #[test]
+    fn deep_nesting_is_rejected_not_a_crash() {
+        let deep = "[".repeat(100_000) + &"]".repeat(100_000);
+        assert!(Json::parse(&deep).is_err());
+        let ok = "[".repeat(10) + &"]".repeat(10);
+        assert!(Json::parse(&ok).is_ok());
     }
 
     #[test]

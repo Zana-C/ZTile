@@ -493,11 +493,7 @@ impl Ui {
                         let _ = DrawIconEx(dc, x, y, ic, size, size, 0, None, DI_NORMAL);
                     }
                     if big {
-                        let name = if !spec.aumid.is_empty() && !spec.title.is_empty() {
-                            spec.title.clone()
-                        } else {
-                            spec.exe_name().trim_end_matches(".exe").to_string()
-                        };
+                        let name = spec.label();
                         let r = rect(c.left + self.s(8), y + size + self.s(4), c.right - self.s(8), y + size + label_h);
                         text(dc, r, &name, self.fonts.small, self.th.text, CENTER);
                     }
@@ -507,7 +503,7 @@ impl Ui {
                     let r = rect(c.left, mid - self.s(34), c.right, mid + self.s(6));
                     text(dc, r, "+", self.fonts.big, self.th.sub, CENTER);
                     let r = rect(c.left, mid + self.s(6), c.right, mid + self.s(28));
-                    text(dc, r, "Uygulama seç", self.fonts.small, self.th.sub, CENTER);
+                    text(dc, r, "Choose an app", self.fonts.small, self.th.sub, CENTER);
                 }
                 None => {}
             }
@@ -532,13 +528,13 @@ impl Ui {
         text(
             dc,
             rect(pad, pad + self.s(38), rc.right - pad, pad + self.s(60)),
-            "Kayıtlı dizilimler",
+            "Saved layouts",
             self.fonts.body,
             self.th.sub,
             LEFT,
         );
         let nb = rect(rc.right - pad - self.s(170), pad + self.s(6), rc.right - pad, pad + self.s(44));
-        self.button(dc, nb, "+  Yeni dizilim", Hit::New, true);
+        self.button(dc, nb, "+  New layout", Hit::New, true);
 
         let top = pad + self.s(84);
         let (cw, ch, gap) = (self.s(250), self.s(216), self.s(16));
@@ -549,7 +545,7 @@ impl Ui {
             text(
                 dc,
                 rect(pad, mid - self.s(30), rc.right - pad, mid),
-                "Henüz kayıtlı dizilim yok",
+                "No saved layouts yet",
                 self.fonts.h2,
                 self.th.text,
                 CENTER,
@@ -557,7 +553,7 @@ impl Ui {
             text(
                 dc,
                 rect(pad, mid, rc.right - pad, mid + self.s(26)),
-                "Sağ üstteki \u{201C}Yeni dizilim\u{201D} ile ilk dizilimini oluştur.",
+                "Create your first one with \u{201C}New layout\u{201D} in the top right.",
                 self.fonts.body,
                 self.th.sub,
                 CENTER,
@@ -586,19 +582,20 @@ impl Ui {
                 .monitor
                 .find(&self.mons)
                 .and_then(|m| self.mons.iter().position(|x| x.device == m.device))
-                .map(|i| format!("Ekran {}", i + 1))
+                .map(|i| format!("Display {}", i + 1))
                 .unwrap_or_default();
             let info_r = rect(card.left + self.s(16), name_r.bottom, card.right - self.s(16), name_r.bottom + self.s(22));
-            text(dc, info_r, &format!("{napps} uygulama · {mon}"), self.fonts.small, self.th.sub, LEFT);
+            let apps_txt = if napps == 1 { "1 app".to_string() } else { format!("{napps} apps") };
+            text(dc, info_r, &format!("{apps_txt} · {mon}"), self.fonts.small, self.th.sub, LEFT);
             if self.open.iter().any(|n| n.eq_ignore_ascii_case(&l.name)) {
                 let r = rect(info_r.right - self.s(48), info_r.top, info_r.right, info_r.bottom);
-                text(dc, r, "açık", self.fonts.small, self.th.accent_fg, DRAW_TEXT_FORMAT(DT_RIGHT.0 | DT_VCENTER.0 | DT_SINGLELINE.0));
+                text(dc, r, "open", self.fonts.small, self.th.accent_fg, DRAW_TEXT_FORMAT(DT_RIGHT.0 | DT_VCENTER.0 | DT_SINGLELINE.0));
                 circle(dc, r.left + self.s(6), (r.top + r.bottom) / 2, self.s(3), self.th.accent_fg);
             }
             self.hit(card, Hit::Card(i));
         }
         let foot = rect(pad, rc.bottom - pad, rc.right - pad, rc.bottom - self.s(8));
-        text(dc, foot, "Karta tıkla: aç  ·  Sağ tık: düzenle, kapat, sil", self.fonts.small, self.th.sub, LEFT);
+        text(dc, foot, "Click a card to open it  ·  Right-click to edit, close or delete", self.fonts.small, self.th.sub, LEFT);
     }
 
     /// Fixed position of the name box (the EDIT child lives inside it).
@@ -619,18 +616,18 @@ impl Ui {
         if self.hovered(Hit::Back) {
             rrect(dc, &back, self.s(6), self.th.hover, None);
         }
-        text(dc, back, "←  Geri", self.fonts.body, self.th.text, CENTER);
+        text(dc, back, "←  Back", self.fonts.body, self.th.text, CENTER);
         self.hit(back, Hit::Back);
-        let title = if is_new { "Yeni dizilim" } else { "Dizilimi düzenle" };
+        let title = if is_new { "New layout" } else { "Edit layout" };
         text(dc, rect(pad + self.s(100), pad, rc.right - pad, pad + self.s(36)), title, self.fonts.h2, self.th.text, LEFT);
 
         // name + monitor
         let nb = self.name_box();
-        text(dc, rect(pad, nb.top, nb.left, nb.bottom), "Ad", self.fonts.body, self.th.sub, LEFT);
+        text(dc, rect(pad, nb.top, nb.left, nb.bottom), "Name", self.fonts.body, self.th.sub, LEFT);
         rrect(dc, &nb, self.s(6), self.th.surface, Some(self.th.border));
         let mut x = nb.right + self.s(36);
-        text(dc, rect(x, nb.top, x + self.s(60), nb.bottom), "Ekran", self.fonts.body, self.th.sub, LEFT);
-        x += self.s(60);
+        text(dc, rect(x, nb.top, x + self.s(64), nb.bottom), "Display", self.fonts.body, self.th.sub, LEFT);
+        x += self.s(70);
         for (i, m) in self.mons.clone().iter().enumerate() {
             let r = rect(x, nb.top, x + self.s(150), nb.bottom);
             let sel = i == mon_idx;
@@ -650,7 +647,7 @@ impl Ui {
 
         // presets
         let py = nb.bottom + self.s(18);
-        text(dc, rect(pad, py, nb.left, py + self.s(42)), "Hazır", self.fonts.body, self.th.sub, LEFT);
+        text(dc, rect(pad, py, nb.left, py + self.s(42)), "Presets", self.fonts.body, self.th.sub, LEFT);
         let mut x = nb.left;
         for (i, p) in layout::PRESETS.iter().enumerate() {
             let r = rect(x, py, x + self.s(64), py + self.s(42));
@@ -716,11 +713,11 @@ impl Ui {
         let kx = if borderless { sw.right - self.s(10) } else { sw.left + self.s(10) };
         circle(dc, kx, (sw.top + sw.bottom) / 2, self.s(7), rgb(255, 255, 255));
         let lab = rect(sw.right + self.s(10), oy, sw.right + self.s(420), oy + self.s(28));
-        text(dc, lab, "Başlık çubuklarını gizle (yalnızca klasik başlıklı uygulamalar)", self.fonts.body, self.th.text, LEFT);
+        text(dc, lab, "Hide title bars (apps with a classic title bar only)", self.fonts.body, self.th.text, LEFT);
         self.hit(rect(sw.left, oy, lab.right, lab.bottom), Hit::Borderless);
 
         let gx = rc.right - pad - self.s(250);
-        text(dc, rect(gx, oy, gx + self.s(110), oy + self.s(28)), "Hücre boşluğu", self.fonts.body, self.th.text, LEFT);
+        text(dc, rect(gx, oy, gx + self.s(110), oy + self.s(28)), "Gap", self.fonts.body, self.th.text, LEFT);
         let minus = rect(gx + self.s(116), oy, gx + self.s(146), oy + self.s(28));
         self.button(dc, minus, "−", Hit::GapMinus, false);
         text(
@@ -737,18 +734,18 @@ impl Ui {
         // bottom bar
         let by = rc.bottom - pad - self.s(38);
         let so = rect(rc.right - pad - self.s(150), by, rc.right - pad, by + self.s(38));
-        self.button(dc, so, "Kaydet ve aç", Hit::SaveOpen, true);
+        self.button(dc, so, "Save and open", Hit::SaveOpen, true);
         let sv = rect(so.left - self.s(110), by, so.left - self.s(10), by + self.s(38));
-        self.button(dc, sv, "Kaydet", Hit::Save, false);
+        self.button(dc, sv, "Save", Hit::Save, false);
         let cc = rect(sv.left - self.s(100), by, sv.left - self.s(10), by + self.s(38));
-        self.button(dc, cc, "İptal", Hit::Cancel, false);
+        self.button(dc, cc, "Cancel", Hit::Cancel, false);
         if !err.is_empty() {
             text(dc, rect(pad, by, cc.left - self.s(16), by + self.s(38)), &err, self.fonts.body, self.th.danger, LEFT);
         } else {
             text(
                 dc,
                 rect(pad, by, cc.left - self.s(16), by + self.s(38)),
-                "Hücreye tıkla: uygulama seç, böl, sil  ·  Aradaki çizgiyi sürükle: oranı ayarla",
+                "Click a cell to choose an app, split or remove it  ·  Drag a divider to resize",
                 self.fonts.small,
                 self.th.sub,
                 LEFT,
@@ -846,14 +843,14 @@ impl Ui {
         let name = self.name_text();
         let ed = self.editor.as_ref().ok_or_else(String::new)?;
         if name.is_empty() {
-            return Err("Dizilime bir ad ver.".into());
+            return Err("Give the layout a name.".into());
         }
         let mut st = Store::load();
         let renamed = ed.original.as_ref().is_none_or(|o| !o.eq_ignore_ascii_case(&name));
         if renamed && st.get(&name).is_some() {
-            return Err(format!("\u{201C}{name}\u{201D} adında bir dizilim zaten var."));
+            return Err(format!("A layout named \u{201C}{name}\u{201D} already exists."));
         }
-        let mon = self.mons.get(ed.monitor).ok_or("Ekran bulunamadı.")?;
+        let mon = self.mons.get(ed.monitor).ok_or("That display isn't connected.")?;
         let l = SavedLayout {
             name: name.clone(),
             monitor: MonitorId::of(mon),
@@ -868,7 +865,7 @@ impl Ui {
             }
         }
         st.put(l.clone());
-        st.save().map_err(|e| format!("Kaydedilemedi: {e}"))?;
+        st.save().map_err(|e| format!("Couldn't save: {e}"))?;
         Ok((l, ed.original.clone()))
     }
 }
@@ -958,13 +955,13 @@ fn card_menu(i: usize) {
         return;
     };
     let cmd = popup(h, |m| unsafe {
-        let _ = AppendMenuW(m, MF_STRING, 1, if is_open { w!("Öne getir") } else { w!("Aç") });
-        let _ = AppendMenuW(m, MF_STRING, 2, w!("Düzenle"));
+        let _ = AppendMenuW(m, MF_STRING, 1, if is_open { w!("Bring to front") } else { w!("Open") });
+        let _ = AppendMenuW(m, MF_STRING, 2, w!("Edit"));
         if is_open {
-            let _ = AppendMenuW(m, MF_STRING, 4, w!("Grubu kapat"));
+            let _ = AppendMenuW(m, MF_STRING, 4, w!("Close group"));
         }
         let _ = AppendMenuW(m, MF_SEPARATOR, 0, None);
-        let _ = AppendMenuW(m, MF_STRING, 3, w!("Sil"));
+        let _ = AppendMenuW(m, MF_STRING, 3, w!("Delete"));
     });
     match cmd {
         1 => run(Action::OpenLayout(l)),
@@ -973,7 +970,7 @@ fn card_menu(i: usize) {
             redraw();
         }
         3 => {
-            let q = win::wide(&format!("\u{201C}{}\u{201D} dizilimi silinsin mi?", l.name));
+            let q = win::wide(&format!("Delete the layout \u{201C}{}\u{201D}?", l.name));
             let yes = unsafe { MessageBoxW(Some(h), PCWSTR(q.as_ptr()), w!("ZTile"), MB_YESNO | MB_ICONQUESTION) } == IDYES;
             if yes {
                 let mut st = Store::load();
@@ -995,7 +992,26 @@ const CM_CLEAR: usize = 901;
 const CM_SPLIT_COLS: usize = 902;
 const CM_SPLIT_ROWS: usize = 903;
 const CM_REMOVE: usize = 904;
-const CM_WINDOW: usize = 1000;
+const CM_ANY_WINDOW: usize = 905;
+const CM_APP: usize = 1000;
+const CM_WINDOW: usize = 2000;
+
+fn short_text(s: &str, n: usize) -> String {
+    if s.chars().count() > n { s.chars().take(n - 3).collect::<String>() + "..." } else { s.to_string() }
+}
+
+/// A window title made into a stable filter: drop unread counters like "(3) ".
+fn title_filter(title: &str) -> String {
+    let t = title.trim();
+    if let Some(rest) = t.strip_prefix('(') {
+        if let Some((num, after)) = rest.split_once(')') {
+            if !num.is_empty() && num.chars().all(|c| c.is_ascii_digit() || c == '+') {
+                return after.trim().to_string();
+            }
+        }
+    }
+    t.to_string()
+}
 
 fn cell_menu(i: usize) {
     let Some((h, cur, multi)) =
@@ -1003,52 +1019,80 @@ fn cell_menu(i: usize) {
     else {
         return;
     };
-    let cands: Vec<AppSpec> = win::app_windows()
-        .into_iter()
-        .filter(|w| !win::is_fullscreen(*w) && win::exe_name(*w) != "ztile.exe")
-        .map(AppSpec::of)
-        .collect();
+    let wins: Vec<apps::OpenWindow> =
+        apps::open_windows().into_iter().filter(|w| !w.app.exe_name().eq_ignore_ascii_case("ztile.exe")).collect();
+    // one entry per app for "any window of this app"
+    let mut app_list: Vec<AppSpec> = Vec::new();
+    for w in &wins {
+        if !app_list.iter().any(|a| a.same_app(&w.app) && a.aumid == w.app.aumid) {
+            app_list.push(w.app.clone());
+        }
+    }
     let cmd = popup(h, |m| unsafe {
         if let Some(c) = &cur {
-            let t = win::wide(&format!("Şu an: {}", c.label()));
+            let t = win::wide(&format!("Now: {}", c.label()));
             let _ = AppendMenuW(m, MF_GRAYED, 0, PCWSTR(t.as_ptr()));
+            if !c.window.is_empty() {
+                let t = win::wide(&format!("Match any {} window", c.display_name()));
+                let _ = AppendMenuW(m, MF_STRING, CM_ANY_WINDOW, PCWSTR(t.as_ptr()));
+            }
             let _ = AppendMenuW(m, MF_SEPARATOR, 0, None);
         }
-        let _ = AppendMenuW(m, MF_GRAYED, 0, w!("Açık pencerelerden:"));
-        for (j, c) in cands.iter().enumerate() {
-            let mut t = c.title.clone();
-            if t.chars().count() > 55 {
-                t = t.chars().take(52).collect::<String>() + "...";
-            }
-            let label = win::wide(&format!("{t}\t{}", c.exe_name()));
-            let _ = AppendMenuW(m, MF_STRING, CM_WINDOW + j, PCWSTR(label.as_ptr()));
+        let _ = AppendMenuW(m, MF_GRAYED, 0, w!("Open apps:"));
+        for (j, a) in app_list.iter().enumerate() {
+            let label = win::wide(&short_text(&a.display_name(), 50));
+            let _ = AppendMenuW(m, MF_STRING, CM_APP + j, PCWSTR(label.as_ptr()));
         }
-        let _ = AppendMenuW(m, MF_STRING, CM_PICK, w!("Program seç..."));
+        if let Ok(sub) = CreatePopupMenu() {
+            for (k, w) in wins.iter().enumerate() {
+                let label = win::wide(&format!("{}\t{}", short_text(&w.title, 55), w.app.display_name()));
+                let _ = AppendMenuW(sub, MF_STRING, CM_WINDOW + k, PCWSTR(label.as_ptr()));
+            }
+            let _ = AppendMenuW(m, MF_POPUP, sub.0 as usize, w!("A specific window"));
+        }
+        let _ = AppendMenuW(m, MF_STRING, CM_PICK, w!("Choose a program..."));
         let _ = AppendMenuW(m, MF_SEPARATOR, 0, None);
         if cur.is_some() {
-            let _ = AppendMenuW(m, MF_STRING, CM_CLEAR, w!("Hücreyi boşalt"));
+            let _ = AppendMenuW(m, MF_STRING, CM_CLEAR, w!("Clear cell"));
         }
-        let _ = AppendMenuW(m, MF_STRING, CM_SPLIT_COLS, w!("Yan yana ikiye böl"));
-        let _ = AppendMenuW(m, MF_STRING, CM_SPLIT_ROWS, w!("Alt alta ikiye böl"));
+        let _ = AppendMenuW(m, MF_STRING, CM_SPLIT_COLS, w!("Split side by side"));
+        let _ = AppendMenuW(m, MF_STRING, CM_SPLIT_ROWS, w!("Split top and bottom"));
         if multi {
-            let _ = AppendMenuW(m, MF_STRING, CM_REMOVE, w!("Hücreyi sil"));
+            let _ = AppendMenuW(m, MF_STRING, CM_REMOVE, w!("Remove cell"));
         }
     });
     let picked = match cmd {
         CM_PICK => apps::pick_program(h).map(Some),
-        n if n >= CM_WINDOW => cands.get(n - CM_WINDOW).cloned().map(Some),
+        CM_ANY_WINDOW => cur.clone().map(|mut c| {
+            c.window.clear();
+            Some(c)
+        }),
+        n if n >= CM_WINDOW => wins.get(n - CM_WINDOW).map(|w| {
+            let mut a = w.app.clone();
+            a.window = title_filter(&w.title);
+            Some(a)
+        }),
+        n if n >= CM_APP => app_list.get(n - CM_APP).cloned().map(Some),
         _ => None,
     };
     with(|u| {
         let Some(e) = u.editor.as_mut() else { return };
+        e.apps.resize(e.tree.cell_count(), None);
+        if i >= e.apps.len() {
+            return; // the layout changed while the menu was open
+        }
+        e.error.clear();
         if let Some(spec) = picked {
             e.apps[i] = spec;
         }
         match cmd {
             CM_CLEAR => e.apps[i] = None,
             CM_SPLIT_COLS | CM_SPLIT_ROWS => {
-                e.tree.split_cell(i, if cmd == CM_SPLIT_COLS { Dir::Cols } else { Dir::Rows });
-                e.apps.insert(i + 1, None);
+                if e.tree.split_cell(i, if cmd == CM_SPLIT_COLS { Dir::Cols } else { Dir::Rows }) {
+                    e.apps.insert(i + 1, None);
+                } else {
+                    e.error = format!("A layout can have at most {} cells.", layout::MAX_CELLS);
+                }
             }
             CM_REMOVE => {
                 if e.tree.remove_cell(i) {
@@ -1058,7 +1102,6 @@ fn cell_menu(i: usize) {
             _ => {}
         }
         e.apps.resize(e.tree.cell_count(), None);
-        e.error.clear();
     });
     redraw();
 }
@@ -1311,5 +1354,18 @@ unsafe extern "system" fn proc_(h: HWND, msg: u32, wp: WPARAM, lp: LPARAM) -> LR
             _ => {}
         }
         DefWindowProcW(h, msg, wp, lp)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::title_filter;
+
+    #[test]
+    fn title_filter_drops_unread_counters() {
+        assert_eq!(title_filter("(3) Instagram - Messages"), "Instagram - Messages");
+        assert_eq!(title_filter("(99+) Chat"), "Chat");
+        assert_eq!(title_filter("Voice Channel | Discord"), "Voice Channel | Discord");
+        assert_eq!(title_filter("(beta) Tool"), "(beta) Tool");
     }
 }

@@ -33,6 +33,16 @@ pub enum Node {
 
 use Node::Cell;
 
+/// Upper bounds for anything read from disk, the CLI or IPC: every cell becomes a
+/// window, and parsing recurses, so untrusted input must stay small.
+pub const MAX_CELLS: usize = 16;
+const MAX_DEPTH: usize = 8;
+
+/// Accept only sane split weights (finite, positive, bounded).
+fn clean_size(v: f64) -> f32 {
+    if v.is_finite() { v.clamp(0.01, 1000.0) as f32 } else { 1.0 }
+}
+
 fn even(dir: Dir, children: Vec<Node>) -> Node {
     Node::Split { dir, sizes: vec![1.0; children.len()], children }
 }
@@ -102,8 +112,12 @@ impl Node {
     }
 
     /// Split cell `idx` in two along `dir`; the new cell becomes number `idx + 1`.
-    pub fn split_cell(&mut self, idx: usize, dir: Dir) {
-        let Some(path) = self.cell_path(idx) else { return };
+    /// Returns false (and changes nothing) at the cell or depth limit.
+    pub fn split_cell(&mut self, idx: usize, dir: Dir) -> bool {
+        if self.cell_count() >= MAX_CELLS {
+            return false;
+        }
+        let Some(path) = self.cell_path(idx) else { return false };
         if let Some((&last, parent_path)) = path.split_last() {
             if let Some(Node::Split { dir: pd, sizes, children }) = self.node_mut(parent_path) {
                 if *pd == dir {
@@ -112,12 +126,19 @@ impl Node {
                     sizes[last] = half;
                     sizes.insert(last + 1, half);
                     children.insert(last + 1, Cell);
-                    return;
+                    return true;
                 }
             }
         }
-        if let Some(n) = self.node_mut(&path) {
-            *n = even(dir, vec![Cell, Cell]);
+        if path.len() >= MAX_DEPTH {
+            return false;
+        }
+        match self.node_mut(&path) {
+            Some(n) => {
+                *n = even(dir, vec![Cell, Cell]);
+                true
+            }
+            None => false,
         }
     }
 
@@ -188,24 +209,34 @@ impl Node {
         }
     }
 
+    /// None for anything malformed, too deep or with too many cells.
     pub fn from_json(j: &Json) -> Option<Node> {
+        let n = Self::from_json_at(j, 0)?;
+        (n.cell_count() <= MAX_CELLS).then_some(n)
+    }
+
+    fn from_json_at(j: &Json, depth: usize) -> Option<Node> {
         if j.as_str() == Some("cell") {
             return Some(Cell);
+        }
+        if depth >= MAX_DEPTH {
+            return None;
         }
         let dir = match j.get("dir")?.as_str()? {
             "cols" => Dir::Cols,
             "rows" => Dir::Rows,
             _ => return None,
         };
-        let children: Vec<Node> = j.get("children")?.as_arr()?.iter().map(Node::from_json).collect::<Option<_>>()?;
+        let kids = j.get("children")?.as_arr()?;
+        if kids.is_empty() || kids.len() > MAX_CELLS {
+            return None;
+        }
+        let children: Vec<Node> = kids.iter().map(|c| Self::from_json_at(c, depth + 1)).collect::<Option<_>>()?;
         let mut sizes: Vec<f32> = match j.get("sizes").and_then(Json::as_arr) {
-            Some(a) => a.iter().map(|v| v.as_f64().unwrap_or(1.0).max(0.01) as f32).collect(),
+            Some(a) => a.iter().map(|v| clean_size(v.as_f64().unwrap_or(1.0))).collect(),
             None => vec![1.0; children.len()],
         };
         sizes.resize(children.len(), 1.0);
-        if children.is_empty() {
-            return None;
-        }
         Some(Node::Split { dir, sizes, children })
     }
 
@@ -229,10 +260,13 @@ impl Node {
     }
 
     pub fn parse_spec(s: &str) -> Option<Node> {
-        let mut p = Spec { s: s.as_bytes(), i: 0 };
+        if s.len() > 1024 {
+            return None;
+        }
+        let mut p = Spec { s: s.as_bytes(), i: 0, depth: 0 };
         let n = p.node()?;
         p.ws();
-        (p.i == p.s.len()).then_some(n)
+        (p.i == p.s.len() && n.cell_count() <= MAX_CELLS).then_some(n)
     }
 }
 
@@ -288,6 +322,7 @@ fn round2(v: f32) -> f32 {
 struct Spec<'a> {
     s: &'a [u8],
     i: usize,
+    depth: usize,
 }
 
 impl Spec<'_> {
@@ -315,9 +350,10 @@ impl Spec<'_> {
         } else {
             return None;
         };
-        if !self.eat("(") {
+        if !self.eat("(") || self.depth >= MAX_DEPTH {
             return None;
         }
+        self.depth += 1;
         let (mut sizes, mut children) = (Vec::new(), Vec::new());
         loop {
             self.ws();
@@ -332,8 +368,11 @@ impl Spec<'_> {
                 self.i = start;
                 1.0
             };
-            sizes.push(weight.max(0.01));
+            sizes.push(clean_size(weight as f64));
             children.push(self.node()?);
+            if children.len() > MAX_CELLS {
+                return None;
+            }
             if self.eat(",") {
                 continue;
             }
@@ -342,6 +381,7 @@ impl Spec<'_> {
             }
             return None;
         }
+        self.depth -= 1;
         Some(Node::Split { dir, sizes, children })
     }
 }
@@ -459,6 +499,31 @@ mod tests {
         assert!(!one.remove_cell(0));
         one.split_cell(0, Dir::Rows);
         assert_eq!(one.to_spec(), "rows(c, c)");
+    }
+
+    #[test]
+    fn untrusted_input_limits() {
+        // deep nesting: rejected, no stack overflow
+        let deep = "rows(".repeat(10_000) + "c" + &")".repeat(10_000);
+        assert!(Node::parse_spec(&deep).is_none());
+        // 20 levels: valid JSON (under its own limit) but deeper than a layout may be
+        let deep_json = "{\"dir\":\"cols\",\"children\":[".repeat(20) + "\"cell\"" + &"]}".repeat(20);
+        assert!(Node::from_json(&Json::parse(&deep_json).unwrap()).is_none());
+        // deeper still: the JSON parser itself refuses
+        let deeper = "{\"dir\":\"cols\",\"children\":[".repeat(40) + "\"cell\"" + &"]}".repeat(40);
+        assert!(Json::parse(&deeper).is_err());
+        // too many cells
+        let many = format!("cols({})", vec!["c"; 17].join(","));
+        assert!(Node::parse_spec(&many).is_none());
+        let max = format!("cols({})", vec!["c"; 16].join(","));
+        assert!(Node::parse_spec(&max).is_some());
+        // weights stay sane
+        let n = Node::from_json(&Json::parse(r#"{"dir":"cols","sizes":[1e999,-5],"children":["cell","cell"]}"#).unwrap()).unwrap();
+        assert!(n.cells().iter().all(|c| c.x0.is_finite() && c.x1.is_finite() && c.x1 >= c.x0));
+        // splitting stops at the limit
+        let mut m = Node::parse_spec(&max).unwrap();
+        assert!(!m.split_cell(0, Dir::Rows));
+        assert_eq!(m.cell_count(), 16);
     }
 
     #[test]

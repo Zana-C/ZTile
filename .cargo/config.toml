@@ -1,0 +1,11 @@
+# Security hardening for the Windows build (MSVC linker flags, no extra dependencies).
+[target.x86_64-pc-windows-msvc]
+rustflags = [
+    # Resolve the exe's own DLL imports from System32 only, never from the exe's
+    # folder (blocks DLL planting next to ztile.exe, e.g. in Downloads).
+    "-C", "link-arg=/DEPENDENTLOADFLAG:0x800",
+    # Control Flow Guard: indirect calls can only go to valid targets.
+    "-C", "control-flow-guard=checks",
+    # Hardware shadow stacks (Intel CET / AMD) where available.
+    "-C", "link-arg=/CETCOMPAT",
+]

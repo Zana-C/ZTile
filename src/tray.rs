@@ -70,11 +70,11 @@ fn menu() {
     let daemon = workspace::daemon_hwnd();
     let cmd = unsafe {
         let Ok(m) = CreatePopupMenu() else { return };
-        let _ = AppendMenuW(m, MF_STRING, CMD_SHOW, w!("ZTile'ı aç"));
+        let _ = AppendMenuW(m, MF_STRING, CMD_SHOW, w!("Open ZTile"));
         let _ = SetMenuDefaultItem(m, CMD_SHOW as u32, 0);
         let _ = AppendMenuW(m, MF_SEPARATOR, 0, None);
         if st.layouts.is_empty() {
-            let _ = AppendMenuW(m, MF_GRAYED, 0, w!("(kayıtlı dizilim yok)"));
+            let _ = AppendMenuW(m, MF_GRAYED, 0, w!("(no saved layouts)"));
         }
         for (i, l) in st.layouts.iter().enumerate() {
             let is_open = open.iter().any(|n| n.eq_ignore_ascii_case(&l.name));
@@ -84,8 +84,8 @@ fn menu() {
         }
         let _ = AppendMenuW(m, MF_SEPARATOR, 0, None);
         let auto = if autostart_enabled() { MF_STRING | MF_CHECKED } else { MF_STRING };
-        let _ = AppendMenuW(m, auto, CMD_AUTOSTART, w!("Windows ile başlat"));
-        let _ = AppendMenuW(m, MF_STRING, CMD_QUIT, w!("Çıkış"));
+        let _ = AppendMenuW(m, auto, CMD_AUTOSTART, w!("Start with Windows"));
+        let _ = AppendMenuW(m, MF_STRING, CMD_QUIT, w!("Quit"));
         let mut pt = POINT::default();
         let _ = GetCursorPos(&mut pt);
         // Required so the menu closes when clicking elsewhere.

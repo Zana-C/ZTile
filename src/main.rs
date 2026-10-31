@@ -17,40 +17,58 @@ use windows::Win32::Foundation::{HWND, RECT};
 use windows::Win32::System::Com::{COINIT_APARTMENTTHREADED, CoInitializeEx};
 use windows::Win32::System::Console::{ATTACH_PARENT_PROCESS, AttachConsole};
 use windows::Win32::UI::HiDpi::{DPI_AWARENESS_CONTEXT_PER_MONITOR_AWARE_V2, SetProcessDpiAwarenessContext};
-use windows::Win32::UI::WindowsAndMessaging::{ASFW_ANY, AllowSetForegroundWindow};
+use windows::Win32::UI::WindowsAndMessaging::AllowSetForegroundWindow;
 
 const USAGE: &str = "\
-ZTile — normalde komut gerekmez: ztile.exe'yi çalıştır, tepsiden kullan.
-Aşağıdakiler hata ayıklama/otomasyon içindir.
+ZTile normally needs no commands: run ztile.exe and use it from the tray.
+The commands below are for scripting and troubleshooting.
 
   ztile list
-      Monitörleri ve açık uygulama pencerelerini listeler.
+      Lists displays and open app windows.
 
-  ztile grid [seçenekler] <pencere> <pencere> ...
-      Pencereleri bir grup olarak dizer (tek taskbar simgesi).
-      <pencere>: başlık/exe parçası (ör. chrome, discord), 0x.. hwnd, ya da + (boş hücre)
-      --layout L      hazır dizilim: full 2v 2h 3v 3h 2x2 1+2 1+3 2+1
-                      ya da özel: \"cols(60:c, 40:rows(c, c))\"  (c = hücre, sayı = oran)
-      --mon N         monitör numarası (list çıktısındaki; varsayılan 0 = birincil)
-      --gap N         hücreler arası boşluk, px (varsayılan 0)
-      --borderless    klasik başlık çubuklarını kaldır (kendi başlığını çizen
-                      Chromium/Electron uygulamalarına dokunmaz)
-      --save AD       bu dizilimi ve uygulamalarını AD ismiyle kaydet
+  ztile grid [options] <window> <window> ...
+      Tiles windows as one group (one taskbar button).
+      <window>: part of a title or exe name (e.g. chrome, discord), a 0x.. hwnd, or + (empty cell)
+      --layout L      preset: full 2v 2h 3v 3h 2x2 1+2 1+3 2+1
+                      or custom: \"cols(60:c, 40:rows(c, c))\"  (c = cell, number = share)
+      --mon N         display number from `list` (default 0 = primary)
+      --gap N         gap between cells in px (default 0)
+      --borderless    hide classic title bars (apps that draw their own, like
+                      Chromium/Electron apps, are left alone)
+      --save NAME     save this layout and its apps as NAME
 
-  ztile open <AD> [--mon N]
-      Kayıtlı dizilimi açar; açık olan uygulamaları bulup yerlerine koyar.
-      --mon verilirse kaydedildiği monitör yerine N numaralı monitörde açar.
-      Açık olmayanların hücresi + olarak boş kalır. Zaten açıksa öne getirir.
+  ztile open <NAME> [--mon N]
+      Opens a saved layout: running apps are moved into place, missing ones are
+      started. --mon opens it on display N instead of its saved display.
+      Already open: brings it to the front.
 
-  ztile quit               bütün grupları çözer ve ZTile'ı kapatır
-  ztile layouts            hazır ve kayıtlı dizilimleri listeler
-  ztile delete <AD>        kayıtlı dizilimi siler
-  ztile place <pencere> <x> <y> <genişlik> <yükseklik>
+  ztile quit               dissolves all groups and exits ZTile
+  ztile layouts            lists presets and saved layouts
+  ztile delete <NAME>      deletes a saved layout
+  ztile place <window> <x> <y> <width> <height>
 
-grid/open/quit çalışan ZTile'a iletilir (çalışmıyorsa önce arka planda başlatılır).
+grid/open/quit are sent to the running ZTile (started in the background if needed).
 ";
 
+/// Runtime hardening for DLLs loaded later (e.g. by the file dialog):
+/// no DLLs from network shares or low-integrity locations, System32 first,
+/// and no legacy injection points (AppInit DLLs, global hooks of other apps).
+fn harden() {
+    use windows::Win32::System::Threading::{
+        ProcessExtensionPointDisablePolicy, ProcessImageLoadPolicy, SetProcessMitigationPolicy,
+    };
+    // PROCESS_MITIGATION_IMAGE_LOAD_POLICY: NoRemoteImages | NoLowMandatoryLabelImages | PreferSystem32Images
+    let image_load: u32 = 0b111;
+    // PROCESS_MITIGATION_EXTENSION_POINT_DISABLE_POLICY: DisableExtensionPoints
+    let ext_points: u32 = 0b1;
+    unsafe {
+        let _ = SetProcessMitigationPolicy(ProcessImageLoadPolicy, &image_load as *const u32 as *const _, 4);
+        let _ = SetProcessMitigationPolicy(ProcessExtensionPointDisablePolicy, &ext_points as *const u32 as *const _, 4);
+    }
+}
+
 fn main() {
+    harden();
     unsafe {
         let _ = SetProcessDpiAwarenessContext(DPI_AWARENESS_CONTEXT_PER_MONITOR_AWARE_V2);
         let _ = CoInitializeEx(None, COINIT_APARTMENTTHREADED);
@@ -64,8 +82,9 @@ fn main() {
             if let Some(d) = workspace::daemon_window() {
                 // Already running: just show its window.
                 if !tray_only {
+                    // let only ZTile itself (not any process) bring its window up
                     unsafe {
-                        let _ = AllowSetForegroundWindow(ASFW_ANY);
+                        let _ = AllowSetForegroundWindow(win::pid(d));
                     }
                     workspace::forward(d, &["show".to_string()]);
                 }
@@ -81,9 +100,7 @@ fn main() {
             workspace::run_loop();
         }
         Some(cmd) => {
-            unsafe {
-                let _ = AttachConsole(ATTACH_PARENT_PROCESS);
-            }
+            attach_console();
             match cmd {
                 "list" => list(),
                 "place" => place(rest),
@@ -96,17 +113,48 @@ fn main() {
     }
 }
 
+/// We're a GUI-subsystem program: to print in the terminal we were started from,
+/// attach to its console and point stdout/stderr at it (unless they're redirected).
+fn attach_console() {
+    use windows::Win32::Foundation::{GENERIC_READ, GENERIC_WRITE};
+    use windows::Win32::Storage::FileSystem::{
+        CreateFileW, FILE_ATTRIBUTE_NORMAL, FILE_SHARE_READ, FILE_SHARE_WRITE, OPEN_EXISTING,
+    };
+    use windows::Win32::System::Console::{GetStdHandle, STD_ERROR_HANDLE, STD_OUTPUT_HANDLE, SetStdHandle};
+    unsafe {
+        if AttachConsole(ATTACH_PARENT_PROCESS).is_err() {
+            return;
+        }
+        for id in [STD_OUTPUT_HANDLE, STD_ERROR_HANDLE] {
+            let missing = GetStdHandle(id).map(|h| h.is_invalid() || h.0.is_null()).unwrap_or(true);
+            if missing {
+                if let Ok(con) = CreateFileW(
+                    windows::core::w!("CONOUT$"),
+                    (GENERIC_READ | GENERIC_WRITE).0,
+                    FILE_SHARE_READ | FILE_SHARE_WRITE,
+                    None,
+                    OPEN_EXISTING,
+                    FILE_ATTRIBUTE_NORMAL,
+                    None,
+                ) {
+                    let _ = SetStdHandle(id, con);
+                }
+            }
+        }
+    }
+}
+
 /// Workspaces live in the tray process: start it if needed, then hand it the command.
 fn send_to_daemon(args: &[String]) {
     let mut d = workspace::daemon_window();
     if d.is_none() {
         if args[0] == "quit" {
-            println!("Çalışan ZTile yok.");
+            println!("ZTile isn't running.");
             return;
         }
         let Ok(exe) = std::env::current_exe() else { return };
         if std::process::Command::new(exe).arg("--tray").spawn().is_err() {
-            eprintln!("ZTile başlatılamadı.");
+            eprintln!("Couldn't start ZTile.");
             return;
         }
         for _ in 0..60 {
@@ -118,16 +166,16 @@ fn send_to_daemon(args: &[String]) {
         }
     }
     let Some(d) = d else {
-        eprintln!("ZTile'a ulaşılamadı.");
+        eprintln!("Couldn't reach ZTile.");
         return;
     };
     unsafe {
-        let _ = AllowSetForegroundWindow(ASFW_ANY);
+        let _ = AllowSetForegroundWindow(win::pid(d));
     }
     if workspace::forward(d, args) {
-        println!("ZTile'a iletildi.");
+        println!("Sent to ZTile.");
     } else {
-        eprintln!("ZTile'a ulaşılamadı.");
+        eprintln!("Couldn't reach ZTile.");
     }
 }
 
@@ -170,7 +218,7 @@ fn resolve(specs: &[String]) -> Vec<Option<HWND>> {
             if let Some(h) = found {
                 used.push(h);
             } else {
-                eprintln!("  ! pencere bulunamadı: \"{s}\" (hücre boş kalacak)");
+                eprintln!("  ! no window matches \"{s}\" (cell stays empty)");
             }
             found
         })
@@ -186,27 +234,28 @@ fn short(s: &str, n: usize) -> String {
 }
 
 fn list() {
-    println!("Monitörler:");
+    println!("Displays:");
     for (i, m) in win::monitors().iter().enumerate() {
         println!(
-            "  [{i}] {} {}{}  çalışma alanı {}",
+            "  [{i}] {} {}{}  work area {}",
             m.device,
             fmt_rect(m.rect),
-            if m.primary { " (birincil)" } else { "" },
+            if m.primary { " (primary)" } else { "" },
             fmt_rect(m.work)
         );
     }
-    println!("\nPencereler (üstteki önce):");
+    println!("\nWindows (topmost first):");
     for h in win::app_windows() {
         let a = AppSpec::of(h);
         println!(
-            "  {:#010x}  {:<22} {:<26} \"{}\"{}{}",
+            "  {:#010x}  {:<22} {:<26} {:<18} \"{}\"{}{}",
             h.0 as usize,
             a.exe_name(),
             fmt_rect(win::frame_rect(h)),
-            short(&a.title, 45),
+            short(&a.display_name(), 18),
+            short(&win::title(h), 40),
             if a.aumid.is_empty() { String::new() } else { format!("  [AUMID {}]", short(&a.aumid, 40)) },
-            if win::is_fullscreen(h) { "  [tam ekran]" } else { "" }
+            if win::is_fullscreen(h) { "  [fullscreen]" } else { "" }
         );
     }
 }
@@ -222,11 +271,11 @@ fn place(a: &[String]) {
     win::place(h, target);
     let got = win::frame_rect(h);
     println!(
-        "{}: hedef {}  sonuç {}  {}",
+        "{}: wanted {}  got {}  {}",
         win::exe_name(h),
         fmt_rect(target),
         fmt_rect(got),
-        if got == target { "OK" } else { "FARKLI (uygulama boyutu dayatıyor olabilir)" }
+        if got == target { "OK" } else { "DIFFERENT (the app may enforce its own size)" }
     );
 }
 
@@ -250,21 +299,22 @@ fn grid(a: &[String]) {
     }
     let lname = layout_arg.unwrap_or_else(|| layout::default_for(specs.len()).to_string());
     let Some(tree) = layout::from_name_or_spec(&lname) else {
-        eprintln!("Bilinmeyen dizilim: {lname}  (ztile layouts ile listele)");
+        eprintln!("Unknown layout: {lname}  (see `ztile layouts`)");
         return;
     };
     let mons = win::monitors();
     let Some(mon) = mons.get(mon_idx).cloned() else {
-        eprintln!("Monitör {mon_idx} yok ({} monitör bulundu).", mons.len());
+        eprintln!("There is no display {mon_idx} ({} found).", mons.len());
         return;
     };
     let n = tree.cell_count();
     let mut hwnds = resolve(&specs);
     if hwnds.len() > n {
-        eprintln!("  ! {} pencere verildi ama dizilim {n} hücreli; fazlası yok sayıldı.", hwnds.len());
+        eprintln!("  ! {} windows given but the layout has {n} cells; the rest are ignored.", hwnds.len());
     }
     hwnds.resize(n, None);
 
+    let specs: Vec<Option<AppSpec>> = hwnds.iter().map(|h| h.map(AppSpec::of)).collect();
     if let Some(name) = &save {
         let mut st = Store::load();
         st.put(SavedLayout {
@@ -273,14 +323,22 @@ fn grid(a: &[String]) {
             tree: tree.clone(),
             gap,
             borderless,
-            apps: hwnds.iter().map(|h| h.map(AppSpec::of)).collect(),
+            apps: specs.clone(),
         });
         match st.save() {
-            Ok(()) => println!("\"{name}\" kaydedildi: {}", Store::path().display()),
-            Err(e) => eprintln!("  ! kaydedilemedi: {e}"),
+            Ok(()) => println!("Saved \"{name}\" to {}", Store::path().display()),
+            Err(e) => eprintln!("  ! couldn't save: {e}"),
         }
     }
-    let _ = workspace::open(workspace::Setup { name: save.unwrap_or_default(), tree, monitor: mon, gap, borderless, hwnds });
+    let _ = workspace::open(workspace::Setup {
+        name: save.unwrap_or_default(),
+        tree,
+        monitor: mon,
+        gap,
+        borderless,
+        hwnds,
+        specs,
+    });
 }
 
 fn open(a: &[String]) {
@@ -289,12 +347,12 @@ fn open(a: &[String]) {
         return;
     };
     if workspace::show_named(name) {
-        println!("\"{name}\" zaten açık, öne getirildi.");
+        println!("\"{name}\" is already open; brought it to the front.");
         return;
     }
     let st = Store::load();
     let Some(l) = st.get(name) else {
-        eprintln!("\"{name}\" diye kayıtlı dizilim yok.");
+        eprintln!("No saved layout named \"{name}\".");
         layouts();
         return;
     };
@@ -304,14 +362,14 @@ fn open(a: &[String]) {
         Some(i) => match mons.get(i) {
             Some(m) => m.clone(),
             None => {
-                eprintln!("Monitör {i} yok ({} monitör bulundu).", mons.len());
+                eprintln!("There is no display {i} ({} found).", mons.len());
                 return;
             }
         },
         None => match l.monitor.find(&mons) {
             Some(m) => m,
             None => {
-                eprintln!("Hiç monitör bulunamadı.");
+                eprintln!("No displays found.");
                 return;
             }
         },
@@ -320,14 +378,14 @@ fn open(a: &[String]) {
 }
 
 fn layouts() {
-    println!("Hazır dizilimler:");
+    println!("Presets:");
     for p in layout::PRESETS {
         println!("  {p:<5} {}", layout::preset(p).unwrap().to_spec());
     }
     let st = Store::load();
-    println!("\nKayıtlı dizilimler ({}):", Store::path().display());
+    println!("\nSaved layouts ({}):", Store::path().display());
     if st.layouts.is_empty() {
-        println!("  (yok — grid ... --save AD ile kaydet)");
+        println!("  (none yet: create one in the ZTile window)");
     }
     for l in &st.layouts {
         let apps: Vec<String> = l.apps.iter().map(|a| a.as_ref().map_or("+".to_string(), AppSpec::label)).collect();
@@ -342,11 +400,11 @@ fn delete(a: &[String]) {
     };
     let mut st = Store::load();
     if !st.remove(name) {
-        eprintln!("\"{name}\" diye kayıtlı dizilim yok.");
+        eprintln!("No saved layout named \"{name}\".");
         return;
     }
     match st.save() {
-        Ok(()) => println!("\"{name}\" silindi."),
-        Err(e) => eprintln!("  ! kaydedilemedi: {e}"),
+        Ok(()) => println!("Deleted \"{name}\"."),
+        Err(e) => eprintln!("  ! couldn't save: {e}"),
     }
 }

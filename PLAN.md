@@ -89,8 +89,30 @@ Kullanıcı kararı: uygulama terminalsiz, tamamen arayüzden kullanılacak. Kod
 - Eksik uygulamaları başlatma: AUMID varsa `shell:AppsFolder\<AUMID>` (Store ve tarayıcı PWA'ları), yoksa exe. Yeni pencere 30 sn boyunca 250 ms'lik zamanlayıcıyla aranır (yalnızca bekleyen başlatma varken çalışır). Açılış ekranı kapanırsa gerçek pencere beklenmeye devam edilir.
 - Hücre uygulamasını hatırlar: uygulama kapanınca "+" menüsünde "▶ X başlat" çıkar. Kayıtlı gruptaki sürükleme / "+" değişiklikleri dizilime otomatik kaydedilir (uygulamanın kapanması kaydı değiştirmez).
 - Program seçici: .exe veya Başlat menüsü kısayolu (.lnk → hedef exe + AUMID okunur).
-- Akıllı Uygulama Denetimi (SAC) bu makinede açıldı ve imzasız derlemeleri engelledi; kullanıcı geliştirme için kapattı.
+- Akıllı Uygulama Denetimi (SAC) açık olan bir sistemde imzasız derlemeler engellenir; geliştirme için SAC'ın kapalı olması gerekir (README'de anlatıldı).
 - Kural: dışarıdan bağımlılık yok (yalnızca Microsoft'un `windows` crate'i); bir şey eklemek gerekirse önce kullanıcıya sorulur.
+
+### Güvenlik ve performans taraması (2026-10-31)
+Düzeltilenler:
+- Exe sertleştirme (`.cargo/config.toml`): bağımlı DLL'ler yalnızca System32'den (`/DEPENDENTLOADFLAG:0x800`, DLL planting'e karşı), Control Flow Guard, CET uyumlu. ASLR/DEP zaten açık. `dumpbin` ile doğrulandı.
+- Çalışma zamanı: uzak/düşük bütünlüklü konumlardan DLL yükleme kapalı, System32 öncelikli, eski enjeksiyon noktaları (AppInit, başka uygulamaların global hook'ları) kapalı.
+- Girdi sınırları: JSON derinliği ≤ 64, dizilim derinliği ≤ 8, hücre ≤ 16, kayıt dosyası ≤ 1 MB, ≤ 200 dizilim, oranlar sonlu ve sınırlı, boşluk 0–64 (yığın taşması / kaynak tüketimi ile çökertmeye karşı).
+- Başlatma: yalnızca yerel diskte var olan `.exe` ya da geçerli biçimde AUMID (betik, belge, ağ yolu, shell namespace'te gezinme yok). Program seçici yalnızca .exe/.lnk.
+- IPC: daemon penceresi ztile.exe'ye ait mi doğrulanıyor (sahte pencereyle engelleme yok); WM_COPYDATA boyut/biçim kontrolü, yalnızca grid/open/show/quit. `AllowSetForegroundWindow` herkese değil sadece ZTile'a.
+- Panik durumunda (panic=abort) üye pencerelerin taskbar butonları, köşeleri ve küçültme durumu geri veriliyor.
+- Performans: konum/kapanma olayları artık sistem genelinden değil yalnızca üye süreçlerden ve sürüklenen pencereden dinleniyor (önceden her fare hareketi ZTile'ı uyandırıyordu). Ölçüm: tepside 10 sn boşta 0,0 ms CPU, 2,0 MB RAM.
+
+Kabul edilen / açık kalanlar:
+- Aynı kullanıcı oturumundaki bir program ZTile'a komut gönderebilir (yalnızca zararsız komutlar; zaten aynı yetkiye sahip). Düşük bütünlüklü süreçler UIPI ile engelli.
+- ZTile Görev Yöneticisi'nden zorla kapatılırsa gizlenen taskbar butonları Explorer yeniden başlayana kadar geri gelmez.
+- ~~`layouts.json` pencere başlıklarını saklıyor~~ → çözüldü: artık yalnızca uygulama adı saklanıyor; başlık parçası sadece kullanıcı bir hücreyi belirli bir pencereye sabitlerse tutuluyor.
+
+### İngilizce arayüz ve uygulama adları (2026-10-31)
+- Arayüz, menüler, CLI ve README İngilizce. Kod yorumları zaten İngilizce.
+- `AppSpec`: `title` alanı kaldırıldı → `name` (görünen uygulama adı) + `window` (isteğe bağlı başlık filtresi). Ad kaynağı sırası: pencerenin RelaunchDisplayName özelliği → AUMID'nin Başlat menüsü adı (PWA'lar ve Store uygulamaları: "WhatsApp Web", "Instagram") → exe'nin FileDescription'ı ("Discord") → exe adı. Eski dosyalardaki `title` okunurken atılır.
+- Editör hücre menüsü: "Open apps" (uygulamanın herhangi bir penceresi), "A specific window" alt menüsü (başlık filtresi, başındaki "(3)" gibi sayaçlar atılır), "Match any window" (filtreyi kaldır).
+- Repoda makineye özel yol/ayar yok; kayıtlar `%APPDATA%\ZTile` altında, ilk açılışta boş başlar.
+- Exe imzasız (Faz 10).
 
 ### Faz 10 — Yayın
 - GitHub Releases: taşınabilir zip, README'de SmartScreen "Yine de çalıştır" adımı.
