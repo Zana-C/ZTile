@@ -122,6 +122,9 @@ const SHELL_CLASSES: &[&str] = &[
     "Shell_SecondaryTrayWnd",
     "ZTileGroup",
     "ZTilePlus",
+    "ZTileMain",
+    "ZTileDaemon",
+    "ZTileOverlay",
 ];
 
 /// "Real" app window: what you'd expect to see on the taskbar / Alt+Tab.
@@ -163,21 +166,30 @@ pub fn app_windows() -> Vec<HWND> {
     v
 }
 
-#[derive(Clone, Copy, Debug)]
+#[derive(Clone, Debug)]
 pub struct Monitor {
-    #[allow(dead_code)] // used from Phase 3 (monitor identity)
-    pub handle: HMONITOR,
     pub rect: RECT,
     pub work: RECT,
     pub primary: bool,
+    /// GDI device name, e.g. \\.\DISPLAY1
+    pub device: String,
 }
 
 fn monitor_info(m: HMONITOR) -> Monitor {
-    let mut mi = MONITORINFO { cbSize: size_of::<MONITORINFO>() as u32, ..Default::default() };
+    let mut mi = MONITORINFOEXW::default();
+    mi.monitorInfo.cbSize = size_of::<MONITORINFOEXW>() as u32;
     unsafe {
-        let _ = GetMonitorInfoW(m, &mut mi);
+        let _ = GetMonitorInfoW(m, &mut mi as *mut MONITORINFOEXW as *mut MONITORINFO);
     }
-    Monitor { handle: m, rect: mi.rcMonitor, work: mi.rcWork, primary: mi.dwFlags & MONITORINFOF_PRIMARY != 0 }
+    let dev = &mi.szDevice;
+    let n = dev.iter().position(|&c| c == 0).unwrap_or(dev.len());
+    let i = mi.monitorInfo;
+    Monitor {
+        rect: i.rcMonitor,
+        work: i.rcWork,
+        primary: i.dwFlags & MONITORINFOF_PRIMARY != 0,
+        device: String::from_utf16_lossy(&dev[..n]),
+    }
 }
 
 pub fn monitors() -> Vec<Monitor> {

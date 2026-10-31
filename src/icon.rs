@@ -1,4 +1,4 @@
-﻿//! App icon lookup + composite "layout" icon for the taskbar.
+//! App icon lookup + composite "layout" icon for the taskbar.
 
 use crate::layout::NRect;
 use crate::win;
@@ -44,11 +44,84 @@ pub fn window_icon(h: HWND) -> HICON {
     }
 }
 
+/// Large icon of an executable (owned by the caller: DestroyIcon when done).
+pub fn exe_icon(path: &str) -> HICON {
+    let p = win::wide(path);
+    let mut large = HICON::default();
+    unsafe {
+        ExtractIconExW(PCWSTR(p.as_ptr()), 0, Some(&mut large), None, 1);
+    }
+    large
+}
+
+/// ZTile's own icon: four rounded accent tiles in a 2x2 grid, transparent around.
+pub fn app_icon(size: i32) -> HICON {
+    let s = size as f32;
+    let margin = (s / 16.0).max(1.0);
+    let gap = (s / 10.0).max(1.0);
+    let tile = (s - 2.0 * margin - gap) / 2.0;
+    let radius = (tile / 4.0).max(1.0);
+    let colors = [0xFF4C9AFFu32, 0xFF7AB6FF, 0xFF7AB6FF, 0xFF4C9AFF];
+    let mut px = vec![0u32; (size * size) as usize];
+    for (t, &col) in colors.iter().enumerate() {
+        let x0 = margin + (t % 2) as f32 * (tile + gap);
+        let y0 = margin + (t / 2) as f32 * (tile + gap);
+        for y in 0..size {
+            for x in 0..size {
+                // distance-based coverage gives smooth rounded corners
+                let (fx, fy) = (x as f32 + 0.5, y as f32 + 0.5);
+                let cx = fx.clamp(x0 + radius, x0 + tile - radius);
+                let cy = fy.clamp(y0 + radius, y0 + tile - radius);
+                let d = ((fx - cx).powi(2) + (fy - cy).powi(2)).sqrt() - radius;
+                let inside = fx >= x0 - 1.0 && fx <= x0 + tile + 1.0 && fy >= y0 - 1.0 && fy <= y0 + tile + 1.0;
+                if !inside {
+                    continue;
+                }
+                let cov = (0.5 - d).clamp(0.0, 1.0);
+                if cov > 0.0 {
+                    let a = (cov * 255.0) as u32;
+                    px[(y * size + x) as usize] = (a << 24) | (col & 0x00FF_FFFF);
+                }
+            }
+        }
+    }
+    icon_from_pixels(&px, size)
+}
+
+/// Build an icon from straight-alpha 0xAARRGGBB pixels, top-down.
+fn icon_from_pixels(src: &[u32], size: i32) -> HICON {
+    unsafe {
+        let bmi = BITMAPINFO {
+            bmiHeader: BITMAPINFOHEADER {
+                biSize: size_of::<BITMAPINFOHEADER>() as u32,
+                biWidth: size,
+                biHeight: -size,
+                biPlanes: 1,
+                biBitCount: 32,
+                biCompression: BI_RGB.0,
+                ..Default::default()
+            },
+            ..Default::default()
+        };
+        let mut bits: *mut c_void = std::ptr::null_mut();
+        let Ok(dib) = CreateDIBSection(None, &bmi, DIB_RGB_COLORS, &mut bits, None, 0) else {
+            return HICON::default();
+        };
+        std::ptr::copy_nonoverlapping(src.as_ptr(), bits as *mut u32, src.len());
+        let mask = CreateBitmap(size, size, 1, 1, None);
+        let ii = ICONINFO { fIcon: true.into(), xHotspot: 0, yHotspot: 0, hbmMask: mask, hbmColor: dib };
+        let icon = CreateIconIndirect(&ii).unwrap_or_default();
+        let _ = DeleteObject(dib.into());
+        let _ = DeleteObject(mask.into());
+        icon
+    }
+}
+
 const BG: u32 = 0xFF1C1C1C;
 const CELL: u32 = 0xFF3A3A3A;
 const EMPTY: u32 = 0xFF262626;
 
-/// Draw a `size`Ã—`size` icon: dark rounded tile, one lighter cell per layout slot,
+/// Draw a `size`×`size` icon: dark rounded tile, one lighter cell per layout slot,
 /// each slot showing its app icon (or nothing if empty).
 pub fn composite(cells: &[NRect], icons: &[Option<HICON>], size: i32) -> HICON {
     unsafe {
@@ -81,10 +154,10 @@ pub fn composite(cells: &[NRect], icons: &[Option<HICON>], size: i32) -> HICON {
         let gap = (s / 16.0).max(1.0);
         let mut slots = Vec::new();
         for c in cells {
-            let x0 = (c.x * (s - gap) + gap).round() as i32;
-            let y0 = (c.y * (s - gap) + gap).round() as i32;
-            let x1 = ((c.x + c.w) * (s - gap)).round() as i32;
-            let y1 = ((c.y + c.h) * (s - gap)).round() as i32;
+            let x0 = (c.x0 * (s - gap) + gap).round() as i32;
+            let y0 = (c.y0 * (s - gap) + gap).round() as i32;
+            let x1 = (c.x1 * (s - gap)).round() as i32;
+            let y1 = (c.y1 * (s - gap)).round() as i32;
             slots.push((x0, y0, x1, y1));
         }
         for (i, &(x0, y0, x1, y1)) in slots.iter().enumerate() {

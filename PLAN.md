@@ -63,6 +63,40 @@ ztile.exe (tek süreç, tek UI thread)
 - Deneyler: `DeleteTab` kalıcılığı (Explorer yeniden başlatma dahil), dinamik birleşik ikon, Chrome/UWP/Electron piksel hassasiyetinde yerleştirme
 - Çıktı: hangi yaklaşım tutuyor raporu → gerekirse plan revizyonu
 
+### Faz 1+2 durumu (2026-10-31)
+Kod tamam, 13 birim testi geçiyor; kullanıcı testi bekleniyor.
+- `layout.rs`: bölme ağacı (`Cell` / `Split{cols|rows, sizes, children}`), komşu hücreler aynı kenar değerini paylaşır (piksel boşluğu/çakışması yok), metin biçimi `cols(60:c, 40:rows(c, c))`.
+- `json.rs`: serde'siz minimal JSON (parse + pretty print).
+- `store.rs`: `%APPDATA%\ZTile\layouts.json`, atomik yazma (tmp + rename), bozuk dosya `.bad` olarak kenara alınır.
+- `apps.rs`: uygulama kimliği = exe + AUMID + sınıf + başlık. Brave PWA'ların (WhatsApp, Instagram) her birinin ayrı AUMID'si var (doğrulandı), başlık değişse de doğru pencere bulunur. Eşleştirme en güçlü eşleşmeden başlayarak açgözlü atama ile yapılır.
+- Monitör kimliği: GDI cihaz adı + çözünürlük, bulunamazsa çözünürlük, sonra birincil.
+- CLI: `grid --save AD`, `open AD`, `layouts`, `delete AD`, `--layout` özel ağaç kabul eder.
+
+### Faz 3 durumu (2026-10-31)
+Kod tamam, kullanıcı testi bekleniyor. `group.rs` → `workspace.rs`.
+- Tek süreç (daemon): gizli mesaj penceresi `ZTileDaemon`; sonraki `grid/open/quit` komutları WM_COPYDATA ile ona iletilir, ana döngüde işlenir (iç içe çağrı yok).
+- Birden çok workspace; her birinin kendi temsilci penceresi ve taskbar butonu var. Aynı monitörde (GDI cihaz adı) bir workspace öne gelince diğerleri küçülür.
+- Bir pencere tek workspace'e ait olabilir; başka gruba eklenirse eskisinden çıkar.
+- Sürükleme göstergesi: üstte duran, tıklamayı geçiren yarı saydam pencere (mavi = swap/doldur, gri = yerine dön, kırmızı = gruptan çık). Yalnızca sürüklenen pencerenin konum olayları işlenir.
+- Gruplar arası sürükle-bırak (iki pencere gruplar arasında yer değiştirir), gruba ait olmayan pencereyi boş "+" hücresine sürükleyerek ekleme.
+- Yerleşme animasyonu henüz yok (sonraya).
+
+### Arayüz adımı durumu (2026-10-31) — Faz 5/6/8'den parçalar öne çekildi
+Kullanıcı kararı: uygulama terminalsiz, tamamen arayüzden kullanılacak. Kod tamam, 17 test geçiyor, kullanıcı testi bekleniyor.
+- `#![windows_subsystem = "windows"]`: konsol yok. Argümansız açılış = tepsi + ana pencere; ZTile zaten çalışıyorsa sadece pencereyi öne getirir. `--tray` = sadece tepsi (otomatik başlangıç). CLI komutları hata ayıklama için duruyor (üst konsola bağlanır, gerekirse tepsi sürecini başlatır).
+- `tray.rs`: tepsi simgesi (kendi çizdiğimiz 2×2 ikon), menü: aç, kayıtlı dizilimler (açık olanlar işaretli), Windows ile başlat (HKCU Run), çıkış. Explorer yeniden başlayınca simge geri eklenir.
+- `ui.rs`: GDI ile çift tamponlu ana pencere, sistem açık/koyu temasını izler. Ana sayfa: dizilim kartları (önizleme + uygulama ikonları, "açık" işareti), tıkla = aç, sağ tık = öne getir/düzenle/kapat/sil. Editör: ad, ekran seçimi, hazır dizilimler, büyük önizleme (hücreye tıkla: açık pencereden/programdan uygulama seç, böl, sil; çizgiyi sürükle: oran), başlıksız mod, hücre boşluğu, Kaydet / Kaydet ve aç. Pencere kapanınca tüm UI kaynakları serbest bırakılır.
+- Eksik uygulamaları başlatma: AUMID varsa `shell:AppsFolder\<AUMID>` (Store ve tarayıcı PWA'ları), yoksa exe. Yeni pencere 30 sn boyunca 250 ms'lik zamanlayıcıyla aranır (yalnızca bekleyen başlatma varken çalışır). Açılış ekranı kapanırsa gerçek pencere beklenmeye devam edilir.
+- Hücre uygulamasını hatırlar: uygulama kapanınca "+" menüsünde "▶ X başlat" çıkar. Kayıtlı gruptaki sürükleme / "+" değişiklikleri dizilime otomatik kaydedilir (uygulamanın kapanması kaydı değiştirmez).
+- Program seçici: .exe veya Başlat menüsü kısayolu (.lnk → hedef exe + AUMID okunur).
+- Akıllı Uygulama Denetimi (SAC) bu makinede açıldı ve imzasız derlemeleri engelledi; kullanıcı geliştirme için kapattı.
+- Kural: dışarıdan bağımlılık yok (yalnızca Microsoft'un `windows` crate'i); bir şey eklemek gerekirse önce kullanıcıya sorulur.
+
+### Faz 10 — Yayın
+- GitHub Releases: taşınabilir zip, README'de SmartScreen "Yine de çalıştır" adımı.
+- Uyarısız dağıtım seçenekleri (karar sonra): Microsoft Store (MSIX, Microsoft imzalar, bireysel hesap ücretsiz), SignPath Foundation (açık kaynak için ücretsiz imza), ücretli sertifika. winget paketi tamamlayıcı olarak.
+- Exe'ye sürüm bilgisi ve ikon kaynağı gömme.
+
 ### Faz 1 — Pencere motoru
 - Gerçek uygulama penceresi filtresi (görünür, sahipsiz, tool window değil, cloaked değil, tam ekran değil)
 - `place(hwnd, rect)`: `DWMWA_EXTENDED_FRAME_BOUNDS` ile kenarlık telafisi, restore, `DeferWindowPos`
