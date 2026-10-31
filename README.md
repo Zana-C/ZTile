@@ -156,4 +156,10 @@ then delete `ztile.exe` and the `%APPDATA%\ZTile` folder.
 
 ## License
 
-Not decided yet.
+ZTile is released under the [MIT License](LICENSE). It includes code from
+Microsoft's Windows crates for Rust, also under the MIT License; see
+[THIRD_PARTY_NOTICES.md](THIRD_PARTY_NOTICES.md). If you redistribute
+`ztile.exe`, include both files.
+
+Windows is a trademark of the Microsoft group of companies. Other app names
+mentioned here belong to their respective owners; ZTile isn't affiliated with them.

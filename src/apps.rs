@@ -452,7 +452,7 @@ mod tests {
 
     #[test]
     fn launch_validation() {
-        assert!(valid_aumid("Brave._crx_hnpfjngllnfapefoaidbinmjnm"));
+        assert!(valid_aumid("Browser._crx_abcdefghijklmnop"));
         assert!(valid_aumid("Microsoft.WindowsCalculator_8wekyb3d8bbwe!App"));
         assert!(valid_aumid("{1AC14E77-02E7-4E5D-B744-2EB1AE5198B7}\\notepad.exe"));
         assert!(!valid_aumid(""));
