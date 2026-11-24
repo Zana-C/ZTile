@@ -5,7 +5,15 @@
 //! children may carry a weight:  cols(60:c, 40:rows(c, c))
 
 use crate::json::Json;
-use windows::Win32::Foundation::RECT;
+
+/// A pixel rectangle by its edges (same shape as Win32's RECT).
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct Rect {
+    pub left: i32,
+    pub top: i32,
+    pub right: i32,
+    pub bottom: i32,
+}
 
 /// Normalized rectangle by its edges, 0..1. Edges (not x/w) so that neighbouring
 /// cells share bit-identical edge values and round to the same pixel.
@@ -419,14 +427,14 @@ pub fn default_for(count: usize) -> &'static str {
 }
 
 /// Map normalized cells into a pixel area with `gap` px between/around cells.
-pub fn to_pixels(cells: &[NRect], area: RECT, gap: i32) -> Vec<RECT> {
+pub fn to_pixels(cells: &[NRect], area: Rect, gap: i32) -> Vec<Rect> {
     let w = (area.right - area.left) as f32;
     let h = (area.bottom - area.top) as f32;
     let px = |o: i32, size: f32, f: f32| o + (f * size).round() as i32;
     let edge = |at_border: bool| if at_border { gap } else { gap / 2 };
     cells
         .iter()
-        .map(|c| RECT {
+        .map(|c| Rect {
             left: px(area.left, w, c.x0) + edge(c.x0 <= 0.0),
             top: px(area.top, h, c.y0) + edge(c.y0 <= 0.0),
             right: px(area.left, w, c.x1) - edge(c.x1 >= 1.0),
@@ -439,7 +447,7 @@ pub fn to_pixels(cells: &[NRect], area: RECT, gap: i32) -> Vec<RECT> {
 mod tests {
     use super::*;
 
-    const AREA: RECT = RECT { left: 0, top: 0, right: 2560, bottom: 1540 };
+    const AREA: Rect = Rect { left: 0, top: 0, right: 2560, bottom: 1540 };
 
     #[test]
     fn presets_have_expected_cells() {
@@ -460,7 +468,7 @@ mod tests {
 
     #[test]
     fn thirds_tile_without_gaps_or_overlap() {
-        let px = to_pixels(&preset("3v").unwrap().cells(), RECT { right: 1001, ..AREA }, 0);
+        let px = to_pixels(&preset("3v").unwrap().cells(), Rect { right: 1001, ..AREA }, 0);
         assert_eq!(px[0].left, 0);
         assert_eq!(px[0].right, px[1].left);
         assert_eq!(px[1].right, px[2].left);

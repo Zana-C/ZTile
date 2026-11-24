@@ -152,4 +152,9 @@ name = "ztile"
 version = "0.1.0"
 dependencies = [
  "windows",
+ "ztile-core",
 ]
+
+[[package]]
+name = "ztile-core"
+version = "0.1.0"

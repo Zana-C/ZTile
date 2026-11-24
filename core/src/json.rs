@@ -72,6 +72,41 @@ impl Json {
         out
     }
 
+    /// Single line, no spaces (for messages).
+    pub fn compact(&self) -> String {
+        let mut out = String::new();
+        self.write_compact(&mut out);
+        out
+    }
+
+    fn write_compact(&self, out: &mut String) {
+        match self {
+            Json::Arr(v) => {
+                out.push('[');
+                for (i, x) in v.iter().enumerate() {
+                    if i > 0 {
+                        out.push(',');
+                    }
+                    x.write_compact(out);
+                }
+                out.push(']');
+            }
+            Json::Obj(v) => {
+                out.push('{');
+                for (i, (k, x)) in v.iter().enumerate() {
+                    if i > 0 {
+                        out.push(',');
+                    }
+                    write_str(out, k);
+                    out.push(':');
+                    x.write_compact(out);
+                }
+                out.push('}');
+            }
+            scalar => scalar.write(out, 0),
+        }
+    }
+
     fn write(&self, out: &mut String, indent: usize) {
         match self {
             Json::Null => out.push_str("null"),
@@ -320,6 +355,8 @@ mod tests {
         assert_eq!(v.get("b").unwrap().get("c").unwrap().as_str(), Some("x\"y\\z\n"));
         assert_eq!(v.get("g").unwrap().as_str(), Some("çğış €"));
         assert_eq!(Json::parse(&v.pretty()).unwrap(), v);
+        assert_eq!(Json::parse(&v.compact()).unwrap(), v);
+        assert!(!v.compact().contains('\n'));
     }
 
     #[test]

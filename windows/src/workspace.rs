@@ -99,6 +99,8 @@ struct Workspace {
     keep_changes: bool,
     minimized: bool,
     icons: Vec<HICON>,
+    /// raised last = highest; decides which of several stacked groups a drop hits
+    z: u64,
 }
 
 impl Workspace {
@@ -155,6 +157,9 @@ struct Drag {
     from: Option<(u32, usize)>,
     start: RECT,
     target: Option<Drop>,
+    /// Some(true) = moving, Some(false) = resizing; decided by the first change.
+    /// Later size changes (crossing to a display with another DPI) don't count.
+    moving: Option<bool>,
 }
 
 /// An app we launched and whose window we're waiting for.
@@ -170,6 +175,8 @@ struct Pending {
 struct App {
     spaces: Vec<Workspace>,
     next_id: u32,
+    /// counter for Workspace::z
+    next_z: u64,
     taskbar: Option<ITaskbarList>,
     /// system-wide hooks for rare events (foreground, drag start/end, minimize)
     hooks: Vec<HWINEVENTHOOK>,
@@ -188,6 +195,11 @@ struct App {
 impl App {
     fn idx(&self, id: u32) -> Option<usize> {
         self.spaces.iter().position(|w| w.id == id)
+    }
+    /// Mark workspace `wi` as the one on top of its stack.
+    fn raise(&mut self, wi: usize) {
+        self.spaces[wi].z = self.next_z;
+        self.next_z += 1;
     }
     /// (workspace index, slot) of a member window
     fn locate(&self, h: HWND) -> Option<(usize, usize)> {
@@ -337,6 +349,7 @@ pub fn init(on_command: fn(&[String])) -> bool {
         let app = App {
             spaces: Vec::new(),
             next_id: 1,
+            next_z: 1,
             taskbar: taskbar(),
             hooks,
             obj_hooks: Vec::new(),
@@ -549,6 +562,7 @@ pub fn open(setup: Setup) -> Option<u32> {
                 keep_changes,
                 minimized: false,
                 icons: Vec::new(),
+                z: 0,
             });
             keep_rep_minimized(rep);
         }
@@ -571,6 +585,8 @@ pub fn open(setup: Setup) -> Option<u32> {
                 win::raise_no_activate(s.plus);
             }
         }
+        let wi = a.spaces.len() - 1;
+        a.raise(wi);
         sync_members(a);
         id
     })?;
@@ -838,6 +854,7 @@ fn minimize_ws(id: u32) {
 fn restore_ws(id: u32) {
     let Some((members, plus)) = with(|a| {
         let i = a.idx(id)?;
+        a.raise(i);
         let ws = &mut a.spaces[i];
         ws.minimized = false;
         for (i, h) in ws.members() {
@@ -1006,17 +1023,19 @@ fn launch_tick() {
 // ---------------------------------------------------------------- dragging
 
 fn drop_target(a: &App, d: &Drag, pt: POINT) -> Option<Drop> {
-    let fr = win::frame_rect(d.h);
-    let (s, f) = (d.start, fr);
-    if s.right - s.left != f.right - f.left || s.bottom - s.top != f.bottom - f.top {
+    let (s, f) = (d.start, win::frame_rect(d.h));
+    let same_size = s.right - s.left == f.right - f.left && s.bottom - s.top == f.bottom - f.top;
+    if !d.moving.unwrap_or(same_size) {
         return None; // resizing, not moving (Phase 7 will resize neighbours)
     }
     let moved = (f.left - s.left).abs() + (f.top - s.top).abs();
+    // Groups on the same display overlap: the one on top is the one you see.
     let hit = a
         .spaces
         .iter()
         .filter(|w| !w.minimized)
-        .find_map(|w| w.cells.iter().position(|c| win::contains(c, pt)).map(|j| (w, j)));
+        .filter_map(|w| w.cells.iter().position(|c| win::contains(c, pt)).map(|j| (w, j)))
+        .max_by_key(|(w, _)| w.z);
     match (d.from, hit) {
         (Some((fid, i)), Some((w, j))) => {
             if (w.id == fid && j == i) || moved < SWAP_MIN_MOVE {
@@ -1052,7 +1071,7 @@ fn drag_start(h: HWND) {
     DRAG_HWND.set(h.0 as isize);
     with(|a| {
         let from = a.locate(h).map(|(wi, s)| (a.spaces[wi].id, s));
-        a.drag = Some(Drag { h, from, start: win::frame_rect(h), target: None });
+        a.drag = Some(Drag { h, from, start: win::frame_rect(h), target: None, moving: None });
         sync_hooks(a); // start hearing this window's moves for the overlay
     });
 }
@@ -1060,7 +1079,14 @@ fn drag_start(h: HWND) {
 fn drag_move(h: HWND) {
     let pt = cursor();
     let change = with(|a| {
-        let d = a.drag.as_ref().filter(|d| d.h == h)?;
+        let d = a.drag.as_mut().filter(|d| d.h == h)?;
+        if d.moving.is_none() {
+            let (s, f) = (d.start, win::frame_rect(h));
+            if s != f {
+                d.moving = Some(s.right - s.left == f.right - f.left && s.bottom - s.top == f.bottom - f.top);
+            }
+        }
+        let d = a.drag.as_ref()?;
         let t = drop_target(a, d, pt);
         if t == d.target {
             return None;
@@ -1105,7 +1131,10 @@ fn show_overlay(ov: HWND, t: Option<Drop>, rect: Option<RECT>) {
 fn drag_end(h: HWND) {
     let pt = cursor();
     let Some((d, ov, target)) = with(|a| {
-        let d = a.drag.take().filter(|d| d.h == h)?;
+        if a.drag.as_ref().is_none_or(|d| d.h != h) {
+            return None;
+        }
+        let d = a.drag.take()?;
         let t = drop_target(a, &d, pt);
         Some((d, a.overlay, t))
     })
@@ -1184,6 +1213,7 @@ fn on_event(ev: u32, h: HWND) {
             with(|a| {
                 if let Some((wi, _)) = a.locate(h) {
                     a.spaces[wi].minimized = false;
+                    a.raise(wi);
                 }
             });
         }
@@ -1299,8 +1329,10 @@ unsafe extern "system" fn daemon_proc(h: HWND, msg: u32, wp: WPARAM, lp: LPARAM)
                 if cds.dwData != COPYDATA_ARGS || cds.lpData.is_null() || len == 0 || len % 2 != 0 || len > 8192 {
                     return LRESULT(0);
                 }
-                let data = std::slice::from_raw_parts(cds.lpData as *const u16, len / 2);
-                let args: Vec<String> = String::from_utf16_lossy(data).split('\0').take(64).map(str::to_string).collect();
+                // read as bytes: the sender's buffer isn't guaranteed to be u16-aligned
+                let bytes = std::slice::from_raw_parts(cds.lpData as *const u8, len);
+                let data: Vec<u16> = bytes.chunks_exact(2).map(|c| u16::from_le_bytes([c[0], c[1]])).collect();
+                let args: Vec<String> = String::from_utf16_lossy(&data).split('\0').take(64).map(str::to_string).collect();
                 if !matches!(args.first().map(String::as_str), Some("grid" | "open" | "show" | "quit")) {
                     return LRESULT(0);
                 }

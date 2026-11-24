@@ -199,7 +199,19 @@ pub fn launch(spec: &AppSpec) -> bool {
 fn launchable_exe(path: &str) -> bool {
     let b = path.as_bytes();
     let local_abs = b.len() > 3 && b[0].is_ascii_alphabetic() && &b[1..3] == b":\\";
-    local_abs && path.to_ascii_lowercase().ends_with(".exe") && std::path::Path::new(path).is_file()
+    // a second ':' would name an NTFS alternate data stream ("a.txt:x.exe")
+    local_abs
+        && !path[2..].contains(':')
+        && path.to_ascii_lowercase().ends_with(".exe")
+        && !is_network_drive(&path[..3])
+        && std::path::Path::new(path).is_file()
+}
+
+/// "Z:\" mapped to a network share looks like a local path: ask Windows.
+fn is_network_drive(root: &str) -> bool {
+    const DRIVE_REMOTE: u32 = 4;
+    let r = win::wide(root);
+    unsafe { windows::Win32::Storage::FileSystem::GetDriveTypeW(PCWSTR(r.as_ptr())) == DRIVE_REMOTE }
 }
 
 /// An AppUserModelID as Windows uses them ("Brave._crx_x", "Microsoft.X_8wekyb3d8bbwe!App",
@@ -335,8 +347,13 @@ impl AppSpec {
         }
     }
 
-    /// Same program (exe and, if both have one, AppUserModelID)?
+    /// Same program (exe and, if both have one, AppUserModelID)? The same
+    /// AppUserModelID alone is enough: a Start menu shortcut of a browser PWA points
+    /// at chrome_proxy.exe while its window belongs to the browser's exe.
     pub fn same_app(&self, o: &AppSpec) -> bool {
+        if !self.aumid.is_empty() && self.aumid == o.aumid {
+            return true;
+        }
         self.exe_name().eq_ignore_ascii_case(o.exe_name())
             && (self.aumid == o.aumid || self.aumid.is_empty() || o.aumid.is_empty())
     }
@@ -364,13 +381,17 @@ impl AppSpec {
             name: j.str_or_empty("name"),
             window: j.str_or_empty("window"),
         };
-        (!a.exe.is_empty()).then_some(a)
+        // Store apps picked from a shortcut may have only an AppUserModelID.
+        (!a.exe.is_empty() || valid_aumid(&a.aumid)).then_some(a)
     }
 
     /// How well an open window (`w`, with its current `title`) matches this spec.
     /// None = can't be it.
     pub fn score(&self, w: &AppSpec, title: &str) -> Option<u32> {
-        if !self.exe_name().eq_ignore_ascii_case(w.exe_name()) {
+        // Same AppUserModelID = same app, whatever exe the spec came from (a PWA's
+        // shortcut points at chrome_proxy.exe; a Store app's has no exe at all).
+        let same_id = !self.aumid.is_empty() && self.aumid == w.aumid;
+        if !same_id && !self.exe_name().eq_ignore_ascii_case(w.exe_name()) {
             return None;
         }
         if self.aumid != w.aumid {
@@ -464,6 +485,7 @@ mod tests {
         assert!(!launchable_exe("\\\\server\\share\\app.exe"));
         assert!(!launchable_exe("relative\\app.exe"));
         assert!(!launchable_exe("C:\\does\\not\\exist.exe"));
+        assert!(!launchable_exe("C:\\Windows\\win.ini:evil.exe"));
     }
 
     #[test]
@@ -479,6 +501,18 @@ mod tests {
         let wa = spec("brave.exe", "Brave._crx_whatsapp", "");
         assert!(wa.score(&spec("brave.exe", "Brave._crx_insta", ""), "WhatsApp Web").is_none());
         assert!(wa.score(&spec("brave.exe", "Brave._crx_whatsapp", ""), "(3) WhatsApp").unwrap() > 100);
+    }
+
+    #[test]
+    fn shortcut_specs_match_by_app_id() {
+        // picked from a Start menu shortcut: proxy exe, but the PWA's id
+        let from_lnk = spec("chrome_proxy.exe", "Brave._crx_whatsapp", "");
+        assert!(from_lnk.score(&spec("brave.exe", "Brave._crx_whatsapp", ""), "WhatsApp").is_some());
+        assert!(from_lnk.score(&spec("brave.exe", "Brave._crx_insta", ""), "Instagram").is_none());
+        assert!(from_lnk.same_app(&spec("brave.exe", "Brave._crx_whatsapp", "")));
+        // a Store app shortcut has no exe at all and must survive a save/load
+        let store_app = AppSpec { exe: String::new(), aumid: "Microsoft.App_8wekyb3d8bbwe!App".into(), ..Default::default() };
+        assert!(AppSpec::from_json(&store_app.to_json()).is_some());
     }
 
     #[test]

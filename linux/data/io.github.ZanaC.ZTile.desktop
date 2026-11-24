@@ -1,0 +1,11 @@
+[Desktop Entry]
+Type=Application
+Name=ZTile
+GenericName=Window layout groups
+Comment=Tile apps into saved layouts, one taskbar button per group
+Exec=ztile
+Icon=io.github.ZanaC.ZTile
+Categories=Utility;Qt;KDE;
+Keywords=tile;tiling;layout;window;grid;group;
+StartupNotify=false
+OnlyShowIn=KDE;

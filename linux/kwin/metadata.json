@@ -1,0 +1,12 @@
+{
+    "KPlugin": {
+        "Id": "ztile",
+        "Name": "ZTile",
+        "Description": "Window engine of the ZTile app (loaded by the app; not meant to be enabled on its own)",
+        "License": "MIT",
+        "Version": "0.2.0",
+        "Website": "https://github.com/Zana-C/ZTile"
+    },
+    "X-Plasma-API": "javascript",
+    "KPackageStructure": "KWin/Script"
+}
