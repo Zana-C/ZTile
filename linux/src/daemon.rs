@@ -893,6 +893,14 @@ impl Daemon {
         match ev {
             // "Close" on the group's taskbar button dissolves the group
             WlEvent::Closed(Role::Proxy(gid)) => self.close_group(gid),
+            // A "+" cell or the overlay must close too when asked: at logout Plasma asks
+            // every window to close and waits for them, so ignoring it blocks the logout.
+            WlEvent::Closed(Role::Plus(gid, _)) => self.close_group(gid),
+            WlEvent::Closed(Role::Overlay) => {
+                if let Some(o) = self.overlay.take() {
+                    self.wl.destroy(o);
+                }
+            }
             WlEvent::Clicked(Role::Plus(gid, cell)) => self.show_ui(&["--cell".into(), gid.to_string(), cell.to_string()]),
             _ => {}
         }
@@ -910,6 +918,12 @@ impl Daemon {
         self.quit_at = Some(Instant::now() + Duration::from_millis(wait));
     }
 
+    /// The compositor is gone (logout): nobody is left to hand windows back to, exit now.
+    pub fn shutdown_now(&mut self) {
+        self.shutdown();
+        self.quit_at = Some(Instant::now());
+    }
+
     fn finish(&mut self) {
         let ids: Vec<u32> = self.groups.iter().map(|g| g.id).collect();
         for id in ids {
@@ -924,7 +938,8 @@ impl Daemon {
             let _ = ui.kill();
             let _ = ui.wait();
         }
-        let _ = Command::new("kbuildsycoca6").stdout(Stdio::null()).stderr(Stdio::null()).status();
+        // don't wait for it: during a logout it can take long, and the session waits for us
+        let _ = Command::new("kbuildsycoca6").stdout(Stdio::null()).stderr(Stdio::null()).spawn();
         self.done = true;
     }
 }

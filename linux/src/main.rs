@@ -178,20 +178,25 @@ fn signal_fd() -> i32 {
 
 fn run(d: &mut Daemon) {
     let sig = signal_fd();
+    let mut wl_dead = false;
     loop {
         // Wayland: handle what's queued, send what we wrote, then wait on all fds.
-        if d.wl.queue.dispatch_pending(&mut d.wl.state).is_err() {
+        if !wl_dead && d.wl.queue.dispatch_pending(&mut d.wl.state).is_err() {
             eprintln!("ztile: lost the Wayland connection");
-            d.shutdown();
+            wl_dead = true;
+            d.shutdown_now();
         }
-        let _ = d.wl.queue.flush();
+        if !wl_dead {
+            let _ = d.wl.queue.flush();
+        }
         for ev in d.wl.take_events() {
             d.on_wl(ev);
         }
         if d.done {
             break;
         }
-        let guard = d.wl.queue.prepare_read();
+        // a dead connection stays readable forever: stop polling it or we spin
+        let guard = if wl_dead { None } else { d.wl.queue.prepare_read() };
         let wl_fd = guard.as_ref().map(|g| g.connection_fd().as_raw_fd()).unwrap_or(-1);
         let mut fds = [
             libc::pollfd { fd: wl_fd, events: libc::POLLIN, revents: 0 },
@@ -212,7 +217,8 @@ fn run(d: &mut Daemon) {
         }
         if n > 0 && fds[0].revents & (libc::POLLHUP | libc::POLLERR) != 0 {
             eprintln!("ztile: the compositor closed the connection");
-            d.shutdown();
+            wl_dead = true;
+            d.shutdown_now();
         }
         for m in d.bus.pump() {
             d.on_message(m);
